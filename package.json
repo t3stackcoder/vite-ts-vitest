@@ -1,0 +1,22 @@
+{
+  "name": "vite-ts-vitest",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.1.1",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
