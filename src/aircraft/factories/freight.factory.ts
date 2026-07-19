@@ -1,10 +1,12 @@
-import { defineFactoryFor } from '../../factory'
+import { defineFactoryFor, factoryProductType } from '../../factory'
 import {
   FREIGHT_AIRCRAFT_FACTORY,
   type AircraftFactoryCatalog,
 } from '../catalog'
 
 const defineAircraftFactory = defineFactoryFor<AircraftFactoryCatalog>()
+
+export const productType = factoryProductType('freighter')
 
 export default defineAircraftFactory(FREIGHT_AIRCRAFT_FACTORY)({
   metadata: {
@@ -13,6 +15,7 @@ export default defineAircraftFactory(FREIGHT_AIRCRAFT_FACTORY)({
     displayName: 'Freight Aircraft Factory',
     version: '1.0.0',
   },
+  productType,
   create(order, options) {
     options?.signal?.throwIfAborted()
 
@@ -29,13 +32,13 @@ export default defineAircraftFactory(FREIGHT_AIRCRAFT_FACTORY)({
         loadingSystem: 'powered-roller' as const,
         payloadKilograms: order.payloadKilograms,
       }),
-      kind: 'freight-aircraft-family' as const,
       orderId: order.orderId,
       propulsion: Object.freeze({
         engineCount: 4 as const,
         engineType: 'high-thrust-turbofan' as const,
         rangeNauticalMiles: order.rangeNauticalMiles,
       }),
+      type: productType,
     })
   },
 })

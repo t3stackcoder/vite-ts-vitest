@@ -3,9 +3,10 @@ import type {
   FactoryAlias,
   FactoryKey,
   FactoryKeyValue,
+  FactoryProductType,
   ModulePath,
 } from './brand'
-import { factoryKeySchema } from './brand'
+import { factoryKeySchema, factoryProductTypeSchema } from './brand'
 
 export type Awaitable<Value> = Value | PromiseLike<Value>
 
@@ -29,19 +30,25 @@ export interface FactoryMetadata {
 
 export interface AbstractFactory<
   out Key extends FactoryKey,
+  out ProductType extends FactoryProductType,
   in Context,
   out Result,
 > {
   readonly key: Key
   readonly metadata: FactoryMetadata
+  readonly productType: ProductType
   create(context: Context, options?: FactoryCreateOptions): Awaitable<Result>
 }
 
 export interface FactoryContract<
   out ContextSchema extends z.ZodType = z.ZodType,
   out ResultSchema extends z.ZodType = z.ZodType,
+  out ProductType extends FactoryProductType = FactoryProductType,
+  out Discriminator extends string = string,
 > {
   readonly contextSchema: ContextSchema
+  readonly discriminator: Discriminator
+  readonly productType: ProductType
   readonly resultSchema: ResultSchema
 }
 
@@ -54,19 +61,37 @@ const zodSchemaSchema = z.custom<z.ZodType>(
 
 const factoryContractDefinitionSchema = z.strictObject({
   contextSchema: zodSchemaSchema,
+  discriminator: z
+    .string()
+    .regex(/^[A-Za-z_$][A-Za-z0-9_$]*$/, {
+      error: 'Expected a JavaScript property identifier.',
+    }),
+  productType: factoryProductTypeSchema,
   resultSchema: zodSchemaSchema,
 })
 
 export function factoryContract<
+  const ProductType extends FactoryProductType,
+  const Discriminator extends string,
   const ContextSchema extends z.ZodType,
-  const ResultSchema extends z.ZodType,
->(
-  contextSchema: ContextSchema,
-  resultSchema: ResultSchema,
-): FactoryContract<ContextSchema, ResultSchema> {
+  const ResultSchema extends z.ZodType<
+    Readonly<Record<NoInfer<Discriminator>, NoInfer<ProductType>>>,
+    Readonly<Record<NoInfer<Discriminator>, NoInfer<ProductType>>>
+  >,
+>(definition: {
+  readonly contextSchema: ContextSchema
+  readonly discriminator: Discriminator
+  readonly productType: ProductType
+  readonly resultSchema: ResultSchema
+}): FactoryContract<ContextSchema, ResultSchema, ProductType, Discriminator> {
   return Object.freeze(
-    factoryContractDefinitionSchema.parse({ contextSchema, resultSchema }),
-  ) as FactoryContract<ContextSchema, ResultSchema>
+    factoryContractDefinitionSchema.parse(definition),
+  ) as FactoryContract<
+    ContextSchema,
+    ResultSchema,
+    ProductType,
+    Discriminator
+  >
 }
 
 export function defineFactoryCatalog<const Catalog extends FactoryCatalog>(
@@ -104,14 +129,30 @@ export type InferFactoryResult<Contract> = Contract extends {
   ? z.output<Schema>
   : never
 
+export type InferFactoryProductType<Contract> = Contract extends {
+  readonly productType: infer ProductType extends FactoryProductType
+}
+  ? ProductType
+  : never
+
+export type InferFactoryDiscriminator<Contract> = Contract extends {
+  readonly discriminator: infer Discriminator extends string
+}
+  ? Discriminator
+  : never
+
 export type FactoryCatalogEntry<
   Key extends FactoryKey,
   ContextSchema extends z.ZodType,
   ResultSchema extends z.ZodType,
+  ProductType extends FactoryProductType,
+  Discriminator extends string,
 > = {
   readonly [Property in FactoryKeyValue<Key>]: FactoryContract<
     ContextSchema,
-    ResultSchema
+    ResultSchema,
+    ProductType,
+    Discriminator
   >
 }
 
@@ -119,14 +160,29 @@ export function factoryCatalogEntry<
   Key extends FactoryKey,
   const ContextSchema extends z.ZodType,
   const ResultSchema extends z.ZodType,
+  const ProductType extends FactoryProductType,
+  const Discriminator extends string,
 >(
   key: Key,
-  contract: FactoryContract<ContextSchema, ResultSchema>,
-): FactoryCatalogEntry<Key, ContextSchema, ResultSchema> {
+  contract: FactoryContract<
+    ContextSchema,
+    ResultSchema,
+    ProductType,
+    Discriminator
+  >,
+): FactoryCatalogEntry<
+  Key,
+  ContextSchema,
+  ResultSchema,
+  ProductType,
+  Discriminator
+> {
   return { [key]: contract } as FactoryCatalogEntry<
     Key,
     ContextSchema,
-    ResultSchema
+    ResultSchema,
+    ProductType,
+    Discriminator
   >
 }
 
@@ -148,6 +204,7 @@ export type FactoryFor<
   Key extends FactoryCatalogKey<Catalog>,
 > = AbstractFactory<
   Key,
+  InferFactoryProductType<ContractAt<Catalog, Key>>,
   InferFactoryContext<ContractAt<Catalog, Key>>,
   InferFactoryRawResult<ContractAt<Catalog, Key>>
 >

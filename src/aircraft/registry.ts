@@ -4,7 +4,6 @@ import {
   type CatalogFactoryModule,
 } from '../factory'
 import {
-  AIRCRAFT_FACTORY_ALIASES,
   AIRCRAFT_FACTORY_CATALOG,
   AIRCRAFT_FACTORY_KEYS_BY_FILE,
   type AircraftFactoryCatalog,
@@ -22,7 +21,6 @@ const keyFromPath = createFilenameKeyResolver(AIRCRAFT_FACTORY_KEYS_BY_FILE)
 
 export function createAircraftFactoryRegistry() {
   return createHarness({
-    aliases: AIRCRAFT_FACTORY_ALIASES,
     keyFromPath,
     modules: aircraftFactoryModules,
   })

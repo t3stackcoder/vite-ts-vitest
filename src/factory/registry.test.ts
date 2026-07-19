@@ -12,6 +12,8 @@ import {
   factoryKey,
   factoryKeySet,
   factoryNamespace,
+  factoryProductType,
+  factoryProductTypeSet,
   modulePath,
   smartFactoryRegistryFor,
   type Awaitable,
@@ -19,6 +21,7 @@ import {
   type FactoryAlias,
   type FactoryCreateOptions,
   type FactoryKey,
+  type FactoryProductTypeSet,
   type FactoryRegistryEvent,
   type FactorySource,
   type GlobLoaderMap,
@@ -28,6 +31,8 @@ import * as publicApi from '.'
 const ALPHA_FACTORY = factoryKey('test:alpha')
 const BETA_FACTORY = factoryKey('test:beta')
 const LEGACY_ALPHA_ALIAS = factoryAlias('test:legacy-alpha')
+const ALPHA_PRODUCT_TYPE = factoryProductType('alpha')
+const BETA_PRODUCT_TYPE = factoryProductType('beta')
 
 const alphaContextSchema = z.strictObject({ value: z.number().finite() }).readonly()
 const alphaResultSchema = z
@@ -50,11 +55,21 @@ type AlphaResult = z.output<typeof alphaResultSchema>
 const TEST_CATALOG = defineFactoryCatalog({
   ...factoryCatalogEntry(
     ALPHA_FACTORY,
-    factoryContract(alphaContextSchema, alphaResultSchema),
+    factoryContract({
+      contextSchema: alphaContextSchema,
+      discriminator: 'kind',
+      productType: ALPHA_PRODUCT_TYPE,
+      resultSchema: alphaResultSchema,
+    }),
   ),
   ...factoryCatalogEntry(
     BETA_FACTORY,
-    factoryContract(betaContextSchema, betaResultSchema),
+    factoryContract({
+      contextSchema: betaContextSchema,
+      discriminator: 'kind',
+      productType: BETA_PRODUCT_TYPE,
+      resultSchema: betaResultSchema,
+    }),
   ),
 })
 
@@ -78,6 +93,7 @@ function alphaFactory(
       displayName: 'Alpha Factory',
       version: '1.0.0',
     },
+    productType: ALPHA_PRODUCT_TYPE,
   })
 }
 
@@ -91,6 +107,7 @@ function betaFactory() {
       displayName: 'Beta Factory',
       version: '1.0.0',
     },
+    productType: BETA_PRODUCT_TYPE,
   })
 }
 
@@ -205,6 +222,7 @@ describe('SmartFactoryRegistry', () => {
               create: () => ({ doubled: 2, kind: 'alpha' }),
               key: ALPHA_FACTORY,
               metadata: { displayName: 'Broken', version: 'not-semver' },
+              productType: ALPHA_PRODUCT_TYPE,
             },
           }),
         ),
@@ -234,6 +252,31 @@ describe('SmartFactoryRegistry', () => {
     })
   })
 
+  it('detects disagreement between factory and contract product types', async () => {
+    const registry = createTestRegistry({
+      sources: [
+        source(ALPHA_FACTORY, 'alpha', async () =>
+          untrustedModule({
+            default: {
+              ...alphaFactory(),
+              productType: BETA_PRODUCT_TYPE,
+            },
+          }),
+        ),
+      ],
+    })
+
+    const report = await registry.preload([ALPHA_FACTORY])
+
+    expect(report.failed[0]?.error).toMatchObject({
+      code: 'FACTORY_PRODUCT_TYPE_MISMATCH',
+      details: {
+        actualProductType: BETA_PRODUCT_TYPE,
+        expectedProductType: ALPHA_PRODUCT_TYPE,
+      },
+    })
+  })
+
   it('captures an immutable factory wrapper instead of retaining a mutable export', async () => {
     const mutableFactory = {
       create(context: AlphaContext): AlphaResult {
@@ -244,6 +287,9 @@ describe('SmartFactoryRegistry', () => {
       },
       key: ALPHA_FACTORY as typeof ALPHA_FACTORY | typeof BETA_FACTORY,
       metadata: { displayName: 'Mutable Alpha', version: '1.0.0' },
+      productType: ALPHA_PRODUCT_TYPE as
+        | typeof ALPHA_PRODUCT_TYPE
+        | typeof BETA_PRODUCT_TYPE,
     }
     const registry = createTestRegistry({
       sources: [
@@ -258,6 +304,7 @@ describe('SmartFactoryRegistry', () => {
     )
 
     mutableFactory.key = BETA_FACTORY
+    mutableFactory.productType = BETA_PRODUCT_TYPE
     mutableFactory.create = () => ({ doubled: -999, kind: 'alpha' })
     mutableFactory.metadata.version = 'malicious-mutation'
 
@@ -304,6 +351,7 @@ describe('SmartFactoryRegistry', () => {
               create: () => ({ doubled: 'not-a-number', kind: 'alpha' }),
               key: ALPHA_FACTORY,
               metadata: { displayName: 'Untrusted Alpha', version: '1.0.0' },
+              productType: ALPHA_PRODUCT_TYPE,
             },
           }),
         ),
@@ -313,6 +361,59 @@ describe('SmartFactoryRegistry', () => {
     await expect(
       registry.create(ALPHA_FACTORY, { value: 1 }),
     ).rejects.toMatchObject({ code: 'INVALID_FACTORY_RESULT' })
+  })
+
+  it('checks the product discriminator after result-schema parsing', async () => {
+    const deceptiveResultSchema = alphaResultSchema.transform((result) => ({
+      ...result,
+      // Deliberately dishonest annotation simulates a schema transform whose
+      // runtime output violates its advertised discriminator type.
+      kind: 'beta' as 'alpha',
+    }))
+    const catalog = defineFactoryCatalog({
+      ...factoryCatalogEntry(
+        ALPHA_FACTORY,
+        factoryContract({
+          contextSchema: alphaContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: deceptiveResultSchema,
+        }),
+      ),
+    })
+    const defineDeceptiveFactory = defineFactoryFor<typeof catalog>()
+    const registry = smartFactoryRegistryFor(catalog)({
+      sources: [
+        {
+          key: ALPHA_FACTORY,
+          load: async () => ({
+            default: defineDeceptiveFactory(ALPHA_FACTORY)({
+              create: (context) => ({
+                doubled: context.value * 2,
+                kind: ALPHA_PRODUCT_TYPE,
+              }),
+              metadata: {
+                displayName: 'Deceptive Result Factory',
+                version: '1.0.0',
+              },
+              productType: ALPHA_PRODUCT_TYPE,
+            }),
+          }),
+          modulePath: modulePath('./fixtures/deceptive.factory.ts'),
+        },
+      ],
+    })
+
+    await expect(
+      registry.create(ALPHA_FACTORY, { value: 2 }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_FACTORY_RESULT',
+      details: {
+        actualProductType: 'beta',
+        discriminator: 'kind',
+        expectedProductType: ALPHA_PRODUCT_TYPE,
+      },
+    })
   })
 
   it('caches load failures until explicitly invalidated', async () => {
@@ -837,6 +938,7 @@ describe('per-factory policy overrides', () => {
             }, 100)
           }),
         metadata: { displayName: 'Slow Beta Factory', version: '1.0.0' },
+        productType: BETA_PRODUCT_TYPE,
       }),
     }))
   }
@@ -913,6 +1015,26 @@ describe('per-factory policy overrides', () => {
 })
 
 describe('type-level guarantees', () => {
+  it('binds result schemas to the declared product discriminator', () => {
+    const mismatchedResultSchema = z
+      .strictObject({
+        kind: z.literal('beta'),
+        value: z.number(),
+      })
+      .readonly()
+
+    factoryContract({
+      contextSchema: alphaContextSchema,
+      discriminator: 'kind',
+      productType: ALPHA_PRODUCT_TYPE,
+      // @ts-expect-error - an alpha contract cannot expose a beta discriminator
+      resultSchema: mismatchedResultSchema,
+    })
+
+    expectTypeOf(TEST_CATALOG['test:alpha'].discriminator).toEqualTypeOf<'kind'>()
+    expectTypeOf(TEST_CATALOG['test:alpha'].productType).toEqualTypeOf<'alpha'>()
+  })
+
   it('rejects colon-less key literals at compile time and at runtime', () => {
     // @ts-expect-error - factory keys require a "namespace:name" literal
     expect(() => factoryKey('missing-colon')).toThrowError()
@@ -945,25 +1067,35 @@ describe('type-level guarantees', () => {
   it('derives a closed vocabulary so undeclared names fail at compile time', () => {
     const keys = factoryKeySet('closed', ['gamma', 'delta'])
     const aliases = factoryAliasSet('closed', ['legacy'])
+    const productTypes = factoryProductTypeSet(['document', 'spreadsheet'])
 
     // The vocabulary is declared once; the branded values and their exact
     // literal types are both derived from that single declaration.
     expect(keys.gamma).toBe('closed:gamma')
     expect(aliases.legacy).toBe('closed:legacy')
+    expect(productTypes.document).toBe('document')
     expectTypeOf(keys.gamma).toEqualTypeOf<FactoryKey<'closed:gamma'>>()
     expectTypeOf(keys.delta).toEqualTypeOf<FactoryKey<'closed:delta'>>()
     expectTypeOf(aliases.legacy).toEqualTypeOf<
       FactoryAlias<'closed:legacy'>
+    >()
+    expectTypeOf(productTypes).toEqualTypeOf<
+      FactoryProductTypeSet<'document' | 'spreadsheet'>
     >()
 
     // @ts-expect-error - 'gamma2' was never declared in the vocabulary
     void keys.gamma2
     // @ts-expect-error - undeclared aliases are property-access errors too
     void aliases.modern
+    // @ts-expect-error - undeclared product types are property-access errors
+    void productTypes.presentation
 
     expect(() => factoryKeySet('closed', ['dup', 'dup'])).toThrowError()
     // @ts-expect-error - segment screening applies to every declared name
     expect(() => factoryKeySet('closed', ['Bad Name'])).toThrowError()
+    expect(() => factoryProductTypeSet(['dup', 'dup'])).toThrowError()
+    // @ts-expect-error - product types use the same segment rules
+    expect(() => factoryProductType('Bad Type')).toThrowError()
   })
 
   it('narrows diagnostic keys to the catalog key union', async () => {
@@ -1010,6 +1142,8 @@ describe('public API surface', () => {
       'factoryKey',
       'factoryKeySet',
       'factoryNamespace',
+      'factoryProductType',
+      'factoryProductTypeSet',
       'isFactoryAlias',
       'isFactoryKey',
       'isFactoryRegistryError',

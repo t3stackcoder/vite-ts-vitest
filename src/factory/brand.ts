@@ -19,6 +19,13 @@ export type FactoryAlias<Value extends string = string> = Brand<
   'FactoryAlias'
 >
 
+/**
+ * A domain-defined product discriminator. Unlike registry keys, product types
+ * remain plain string literals so TypeScript can use them naturally in
+ * discriminated unions.
+ */
+export type FactoryProductType<Value extends string = string> = Value
+
 export type ModulePath = Brand<string, 'ModulePath'>
 
 export type FactoryKeyValue<Key extends FactoryKey> = Key[typeof brandToken][
@@ -34,6 +41,8 @@ const FACTORY_LOOKUP_PATTERN = new RegExp(
 const factorySegmentSchema = z.string().regex(FACTORY_SEGMENT_PATTERN, {
   error: 'Expected a lowercase kebab-case segment without a colon.',
 })
+
+export const factoryProductTypeSchema = factorySegmentSchema
 
 const factoryLookupValueSchema = z
   .string()
@@ -157,6 +166,10 @@ export type FactoryAliasSet<Namespace extends string, Name extends string> = {
   readonly [Segment in Name]: FactoryAlias<`${Namespace}:${Segment}`>
 }
 
+export type FactoryProductTypeSet<Name extends string> = {
+  readonly [Segment in Name]: FactoryProductType<Segment>
+}
+
 type ScreenedSegments<Names extends readonly string[]> = {
   readonly [Index in keyof Names]: FactoryKeySegment<Names[Index] & string>
 }
@@ -188,6 +201,30 @@ export function factoryKeySet<
   }
 
   return Object.freeze(record) as FactoryKeySet<Namespace, Names[number]>
+}
+
+/** Defines one product discriminator beside the factory that produces it. */
+export function factoryProductType<const Value extends string>(
+  value: Value & FactoryKeySegment<Value>,
+): FactoryProductType<Value> {
+  return factoryProductTypeSchema.parse(value) as FactoryProductType<Value>
+}
+
+/** Builds the design-time property set generated from factory declarations. */
+export function factoryProductTypeSet<const Names extends readonly string[]>(
+  names: Names & ScreenedSegments<Names>,
+): FactoryProductTypeSet<Names[number]> {
+  const record: Record<string, FactoryProductType> = {}
+
+  for (const name of names) {
+    if (Object.hasOwn(record, name)) {
+      throw new TypeError(`Duplicate product type "${name}".`)
+    }
+
+    record[name] = factoryProductType(name)
+  }
+
+  return Object.freeze(record) as FactoryProductTypeSet<Names[number]>
 }
 
 /** The alias counterpart of factoryKeySet: one declared vocabulary, branded alias values as properties. */

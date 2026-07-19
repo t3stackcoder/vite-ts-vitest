@@ -11,6 +11,8 @@ export {
   factoryKey,
   factoryKeySet,
   factoryNamespace,
+  factoryProductType,
+  factoryProductTypeSet,
   isFactoryAlias,
   isFactoryKey,
   modulePath,
@@ -25,6 +27,8 @@ export type {
   FactoryKeyValue,
   FactoryLookupLiteral,
   FactoryNamespace,
+  FactoryProductType,
+  FactoryProductTypeSet,
   ModulePath,
 } from './brand'
 export {
@@ -57,7 +61,9 @@ export type {
   FactorySource,
   FactoryValidatedContextForLookup,
   InferFactoryContext,
+  InferFactoryDiscriminator,
   InferFactoryInput,
+  InferFactoryProductType,
   InferFactoryRawResult,
   InferFactoryResult,
 } from './contracts'

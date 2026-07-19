@@ -1,22 +1,26 @@
 import { z } from 'zod'
 import {
+  factoryDefinitionSet,
+  factorySet,
+  productTypeSet,
+} from '../factory-set.generated'
+import {
   defineFactoryCatalog,
-  factoryAliasSet,
   factoryCatalogEntry,
   factoryContract,
-  factoryKeySet,
   type Brand,
-  type FactoryAliasMap,
 } from '../factory'
 
-// The aircraft vocabulary, declared exactly once. Every other mention is a
-// compiler-checked property access — an undeclared name cannot compile.
-const aircraft = factoryKeySet('aircraft', ['passenger', 'freight'])
-const aircraftAlias = factoryAliasSet('aircraft', ['airliner'])
+// Canonical keys are generated from *.factory.ts filenames. Every other
+// mention is compiler-checked; an undiscovered name cannot compile.
+const aircraft = factorySet.aircraft
+const aircraftFactories = factoryDefinitionSet.aircraft
+export const aircraftType = productTypeSet.aircraft
 
-export const PASSENGER_AIRCRAFT_FACTORY = aircraft.passenger
-export const FREIGHT_AIRCRAFT_FACTORY = aircraft.freight
-export const AIRLINER_FACTORY_ALIAS = aircraftAlias.airliner
+export { factoryDefinitionSet, factorySet, productTypeSet }
+
+export const PASSENGER_AIRCRAFT_FACTORY = aircraftFactories.passenger.key
+export const FREIGHT_AIRCRAFT_FACTORY = aircraftFactories.freight.key
 
 export type AircraftOrderId = Brand<string, 'AircraftOrderId'>
 
@@ -69,7 +73,6 @@ export const PASSENGER_AIRCRAFT_FAMILY_SCHEMA = z
         pressureControlled: z.literal(true),
       })
       .readonly(),
-    kind: z.literal('passenger-aircraft-family'),
     orderId: AIRCRAFT_ORDER_ID_SCHEMA,
     propulsion: z
       .strictObject({
@@ -78,6 +81,7 @@ export const PASSENGER_AIRCRAFT_FAMILY_SCHEMA = z
         rangeNauticalMiles: z.number().finite().positive(),
       })
       .readonly(),
+    type: z.literal(aircraftType.airliner),
   })
   .readonly()
 
@@ -101,7 +105,6 @@ export const FREIGHT_AIRCRAFT_FAMILY_SCHEMA = z
         payloadKilograms: z.number().finite().positive(),
       })
       .readonly(),
-    kind: z.literal('freight-aircraft-family'),
     orderId: AIRCRAFT_ORDER_ID_SCHEMA,
     propulsion: z
       .strictObject({
@@ -110,6 +113,7 @@ export const FREIGHT_AIRCRAFT_FAMILY_SCHEMA = z
         rangeNauticalMiles: z.number().finite().positive(),
       })
       .readonly(),
+    type: z.literal(aircraftType.freighter),
   })
   .readonly()
 
@@ -117,37 +121,36 @@ export type PassengerBuildOrder = z.output<
   typeof PASSENGER_BUILD_ORDER_SCHEMA
 >
 export type FreightBuildOrder = z.output<typeof FREIGHT_BUILD_ORDER_SCHEMA>
-export type PassengerAircraftFamily = z.output<
-  typeof PASSENGER_AIRCRAFT_FAMILY_SCHEMA
->
-export type FreightAircraftFamily = z.output<
-  typeof FREIGHT_AIRCRAFT_FAMILY_SCHEMA
->
+export const AIRCRAFT_FAMILY_SCHEMA = z.discriminatedUnion('type', [
+  PASSENGER_AIRCRAFT_FAMILY_SCHEMA,
+  FREIGHT_AIRCRAFT_FAMILY_SCHEMA,
+])
+
+export type Airliner = z.output<typeof PASSENGER_AIRCRAFT_FAMILY_SCHEMA>
+export type Freighter = z.output<typeof FREIGHT_AIRCRAFT_FAMILY_SCHEMA>
+export type Aircraft = z.output<typeof AIRCRAFT_FAMILY_SCHEMA>
 
 export const AIRCRAFT_FACTORY_CATALOG = defineFactoryCatalog({
   ...factoryCatalogEntry(
     PASSENGER_AIRCRAFT_FACTORY,
-    factoryContract(
-      PASSENGER_BUILD_ORDER_SCHEMA,
-      PASSENGER_AIRCRAFT_FAMILY_SCHEMA,
-    ),
+    factoryContract({
+      contextSchema: PASSENGER_BUILD_ORDER_SCHEMA,
+      discriminator: 'type',
+      productType: aircraftFactories.passenger.productType,
+      resultSchema: PASSENGER_AIRCRAFT_FAMILY_SCHEMA,
+    }),
   ),
   ...factoryCatalogEntry(
     FREIGHT_AIRCRAFT_FACTORY,
-    factoryContract(
-      FREIGHT_BUILD_ORDER_SCHEMA,
-      FREIGHT_AIRCRAFT_FAMILY_SCHEMA,
-    ),
+    factoryContract({
+      contextSchema: FREIGHT_BUILD_ORDER_SCHEMA,
+      discriminator: 'type',
+      productType: aircraftFactories.freight.productType,
+      resultSchema: FREIGHT_AIRCRAFT_FAMILY_SCHEMA,
+    }),
   ),
 })
 
 export type AircraftFactoryCatalog = typeof AIRCRAFT_FACTORY_CATALOG
 
-export const AIRCRAFT_FACTORY_ALIASES = {
-  [AIRLINER_FACTORY_ALIAS]: PASSENGER_AIRCRAFT_FACTORY,
-} as const satisfies FactoryAliasMap<AircraftFactoryCatalog>
-
-export const AIRCRAFT_FACTORY_KEYS_BY_FILE = {
-  freight: FREIGHT_AIRCRAFT_FACTORY,
-  passenger: PASSENGER_AIRCRAFT_FACTORY,
-} as const
+export const AIRCRAFT_FACTORY_KEYS_BY_FILE = aircraft

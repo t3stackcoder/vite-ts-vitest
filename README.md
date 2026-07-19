@@ -11,6 +11,7 @@ npm install
 npm run typecheck
 npm test
 npm run build
+npm run verify
 ```
 
 The full design document — architecture, type system, resilience machinery,
@@ -20,26 +21,60 @@ in [docs/factory-kernel.md](docs/factory-kernel.md).
 ## Architecture
 
 - `src/factory/` is reusable infrastructure with no aircraft-domain imports.
-- `src/aircraft/catalog.ts` is the runtime Zod catalog and branded-key map.
+- `src/factory-set.generated.ts` is the checked-in, factory-derived vocabulary
+  used for design-time completion such as `factorySet.aircraft.passenger` and
+  `productTypeSet.aircraft.airliner`; `factoryDefinitionSet` preserves the
+  generated relationship between them.
+- `src/aircraft/catalog.ts` is the runtime Zod catalog and product union.
 - `src/aircraft/factories/` contains independently loadable factory modules.
 - `src/aircraft/registry.ts` is the Vite composition root containing the
   literal `import.meta.glob()` call.
+- `src/report/` is a deliberately different proof domain whose result union
+  discriminates on `format` rather than `type`.
 
 Vite must see a literal glob pattern at the call site. The harness therefore
 accepts Vite's loader map instead of trying to accept a runtime glob string.
 
 ## Adding a factory
 
-1. Create a branded key from your domain's namespace builder, e.g.
-   `aircraft.key('cargo-drone')` (see `factoryNamespace()`); the
-   "namespace:name" format is composed by the type system, never typed by
-   hand.
-2. Define Zod schemas for the factory context and product family.
-3. Add them with `factoryContract()` and `factoryCatalogEntry()`.
-4. Map the module filename stem to the key.
-5. Default-export a factory created by `defineFactoryFor<Catalog>()`.
-6. Add the matching `*.factory.ts` file; the composition root needs no new
-   import or registration statement.
+1. Add the matching `*.factory.ts` file under
+   `src/<namespace>/factories/`. Code generation derives its branded key from
+   the directory and filename; for example,
+   `src/aircraft/factories/cargo-drone.factory.ts` becomes
+   `factorySet.aircraft['cargo-drone']`.
+2. Declare the product discriminator once in the factory module, for example
+   `export const productType = factoryProductType('airliner')`. Generation
+   derives `productTypeSet.aircraft.airliner` and connects it to the key at
+   `factoryDefinitionSet.aircraft['cargo-drone']`.
+3. Define Zod schemas for the factory context and product family. Use the
+   generated product type as the result's discriminator.
+4. Add them with `factoryContract()` and `factoryCatalogEntry()`, consuming the
+   generated definition's `key` and `productType`. The contract also names its
+   discriminator property. Typechecking requires both schema input and output
+   to carry that exact product type at that property.
+5. Default-export a factory created by `defineFactoryFor<Catalog>()`, including
+   its declared `productType`.
+
+`npm run generate:factories` updates the checked-in generated file. It runs
+before dev, build, typecheck, and tests; the Vite development server also
+regenerates when factory files are added, changed, or removed. CI can run
+`npm run codegen:check` to reject stale output.
+
+The complete contract shape is explicit and domain-neutral:
+
+```ts
+const definition = factoryDefinitionSet.aircraft.passenger
+
+factoryContract({
+  contextSchema,
+  discriminator: 'type',
+  productType: definition.productType,
+  resultSchema,
+})
+```
+
+Another domain can choose `discriminator: 'format'`; the kernel does not
+reserve a field name.
 
 The loader remains fully typed from Vite through `FactorySource`:
 
@@ -48,10 +83,19 @@ import.meta.glob<CatalogFactoryModule<Catalog>>('./factories/*.factory.ts')
 // FactorySource.load(): Promise<CatalogFactoryModule<Catalog>>
 ```
 
-Zod independently parses the runtime module boundary. The catalog's context
+Zod independently parses the runtime module boundary. The loaded factory's key
+and product type must agree with its catalog contract. The catalog's context
 schema parses data before the chunk loads, and its result schema parses the
-factory output before the caller receives it. Registry input types use
-`z.input`; factory implementations and returned products use `z.output`.
+factory output before the caller receives it. After parsing, the registry
+independently verifies the configured discriminator against the product type.
+Registry input types use `z.input`; factory implementations and returned
+products use `z.output`.
+
+Product types are domain-defined discriminators, not factory aliases. The
+aircraft example produces an `Aircraft = Airliner | Freighter` union. Checking
+`aircraft.type === aircraftType.freighter` narrows away airliner-only fields
+such as `cabin`; selecting `factorySet.aircraft.freight` similarly accepts only
+the freight build-order fields.
 
 ## Registry behavior
 

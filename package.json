@@ -4,11 +4,19 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "generate:factories": "node scripts/generate-factory-set.mjs",
+    "codegen:check": "node scripts/generate-factory-set.mjs --check",
+    "predev": "npm run generate:factories",
     "dev": "vite",
+    "prebuild": "npm run generate:factories",
     "build": "tsc && vite build",
+    "pretypecheck": "npm run generate:factories",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run generate:factories",
     "test": "vitest run",
+    "pretest:watch": "npm run generate:factories",
     "test:watch": "vitest",
+    "verify": "npm run codegen:check && tsc --noEmit && vitest run && vite build",
     "preview": "vite preview"
   },
   "devDependencies": {

@@ -1,15 +1,27 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
-  AIRLINER_FACTORY_ALIAS,
   FREIGHT_AIRCRAFT_FACTORY,
   PASSENGER_AIRCRAFT_FACTORY,
   aircraftOrderId,
-  type FreightAircraftFamily,
-  type PassengerAircraftFamily,
+  aircraftType,
+  factorySet,
+  type Aircraft,
+  type Airliner,
+  type Freighter,
 } from './catalog'
 import { createAircraftFactoryRegistry } from './registry'
 
 describe('aircraft factory composition root', () => {
+  it('exposes filename-derived keys through the generated namespace set', () => {
+    expect(factorySet.aircraft.passenger).toBe(PASSENGER_AIRCRAFT_FACTORY)
+    expect(factorySet.aircraft.freight).toBe(FREIGHT_AIRCRAFT_FACTORY)
+    expect(aircraftType.airliner).toBe('airliner')
+    expect(aircraftType.freighter).toBe('freighter')
+    expectTypeOf(factorySet.aircraft.passenger).toEqualTypeOf<
+      typeof PASSENGER_AIRCRAFT_FACTORY
+    >()
+  })
+
   it('discovers both modules lazily through the literal Vite glob', () => {
     const registry = createAircraftFactoryRegistry()
 
@@ -25,7 +37,7 @@ describe('aircraft factory composition root', () => {
         },
         {
           activeCreations: 0,
-          aliases: [AIRLINER_FACTORY_ALIAS],
+          aliases: [],
           circuit: { consecutiveFailures: 0, status: 'closed' },
           key: PASSENGER_AIRCRAFT_FACTORY,
           modulePath: './factories/passenger.factory.ts',
@@ -38,11 +50,14 @@ describe('aircraft factory composition root', () => {
   it('creates distinct, strongly inferred product families', async () => {
     const registry = createAircraftFactoryRegistry()
 
-    const passengerFamily = await registry.create(AIRLINER_FACTORY_ALIAS, {
-      orderId: aircraftOrderId('AO-100001'),
-      rangeNauticalMiles: 5_500,
-      seats: 220,
-    })
+    const passengerFamily = await registry.create(
+      factorySet.aircraft.passenger,
+      {
+        orderId: aircraftOrderId('AO-100001'),
+        rangeNauticalMiles: 5_500,
+        seats: 220,
+      },
+    )
     const freightFamily = await registry.create(FREIGHT_AIRCRAFT_FACTORY, {
       orderId: aircraftOrderId('AO-100002'),
       payloadKilograms: 130_000,
@@ -52,15 +67,45 @@ describe('aircraft factory composition root', () => {
     expect(passengerFamily).toMatchObject({
       airframe: { role: 'passenger', seatCapacity: 220 },
       cabin: { emergencyExits: 5 },
-      kind: 'passenger-aircraft-family',
+      type: aircraftType.airliner,
     })
     expect(freightFamily).toMatchObject({
       airframe: { role: 'freight' },
       cargoDeck: { payloadKilograms: 130_000 },
-      kind: 'freight-aircraft-family',
+      type: aircraftType.freighter,
     })
-    expectTypeOf(passengerFamily).toEqualTypeOf<PassengerAircraftFamily>()
-    expectTypeOf(freightFamily).toEqualTypeOf<FreightAircraftFamily>()
+    expectTypeOf(passengerFamily).toEqualTypeOf<Airliner>()
+    expectTypeOf(freightFamily).toEqualTypeOf<Freighter>()
+  })
+
+  it('narrows mixed products by their generated product type', async () => {
+    const registry = createAircraftFactoryRegistry()
+    const products: Aircraft[] = [
+      await registry.create(factorySet.aircraft.passenger, {
+        orderId: aircraftOrderId('AO-100004'),
+        rangeNauticalMiles: 5_500,
+        seats: 220,
+      }),
+      await registry.create(factorySet.aircraft.freight, {
+        orderId: aircraftOrderId('AO-100005'),
+        payloadKilograms: 130_000,
+        rangeNauticalMiles: 4_300,
+      }),
+    ]
+
+    for (const aircraft of products) {
+      if (aircraft.type === aircraftType.airliner) {
+        expectTypeOf(aircraft).toEqualTypeOf<Airliner>()
+        expect(aircraft.cabin.pressureControlled).toBe(true)
+        // @ts-expect-error - cargo decks do not exist on the airliner branch
+        void aircraft.cargoDeck
+      } else {
+        expectTypeOf(aircraft).toEqualTypeOf<Freighter>()
+        expect(aircraft.cargoDeck.payloadKilograms).toBe(130_000)
+        // @ts-expect-error - cabins do not exist on the freighter branch
+        void aircraft.cabin
+      }
+    }
   })
 
   it('reports domain schema failures with registry context', async () => {
@@ -71,6 +116,20 @@ describe('aircraft factory composition root', () => {
         orderId: aircraftOrderId('AO-100003'),
         rangeNauticalMiles: 5_500,
         seats: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_FACTORY_CONTEXT' })
+  })
+
+  it('rejects airliner-only fields from freighter build orders', async () => {
+    const registry = createAircraftFactoryRegistry()
+
+    await expect(
+      registry.create(factorySet.aircraft.freight, {
+        orderId: aircraftOrderId('AO-100006'),
+        payloadKilograms: 130_000,
+        rangeNauticalMiles: 4_300,
+        // @ts-expect-error - freighter orders do not accept passenger seating
+        seats: 12,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_FACTORY_CONTEXT' })
   })

@@ -6,8 +6,8 @@ trust boundaries, and per-factory resilience policy (timeouts, concurrency
 bulkheads, circuit breakers) — with full type inference from schema to call
 site and push-based operational events.
 
-The aircraft domain in `src/aircraft/` is a reference implementation, not the
-product. The kernel is `src/factory/`.
+The aircraft and report domains in `src/aircraft/` and `src/report/` are proof
+implementations, not the product. The kernel is `src/factory/`.
 
 ---
 
@@ -33,9 +33,9 @@ backed by a runtime check, and every runtime state has a defined exit.**
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ Consumer domain (src/aircraft/ — reference implementation)│
+│ Consumer domains (src/aircraft/ and src/report/)           │
 │                                                           │
-│  catalog.ts     branded keys + Zod contracts (the spec)   │
+│  catalog.ts     generated vocabulary + Zod contracts     │
 │  factories/     independently loadable *.factory.ts files │
 │  registry.ts    composition root: literal import.meta.glob│
 └──────────────────────────┬────────────────────────────────┘
@@ -85,18 +85,36 @@ still owns that.
 
 The preferred construction removes the typo surface entirely:
 `factoryNamespace('aircraft')` returns a builder whose `key('passenger')` and
-`alias('airliner')` compose the literal for you — the namespace is written
-once, the colon is never typed, and template-literal inference produces the
-exact brand (`FactoryKey<'aircraft:passenger'>`). Each segment passes a
+`alias('legacy-passenger')` compose the literal for you — the namespace is
+written once, the colon is never typed, and template-literal inference produces
+the exact brand (`FactoryKey<'aircraft:passenger'>`). Each segment passes a
 compile-time screen (`FactoryKeySegment`) rejecting uppercase, spaces,
 colons, underscores, leading digits, and separator-edged segments; the
 namespace is also validated eagerly at runtime. Free-form `factoryKey()`
 remains for keys arriving as data.
 
+Product types are validated lowercase literal strings rather than brands so
+they work naturally as discriminators. Every factory module exports exactly
+one declaration such as
+`productType = factoryProductType('airliner')`.
+
+The generator derives three namespace trees from
+`src/<namespace>/factories/*.factory.ts` into
+`src/factory-set.generated.ts`: filenames produce canonical keys such as
+`factorySet.aircraft.passenger`, while product declarations produce values
+such as `productTypeSet.aircraft.airliner`. The third tree preserves their
+relationship as `factoryDefinitionSet.aircraft.passenger`. This bridges
+filesystem discovery into the TypeScript language service and prevents a
+catalog from manually reconnecting a factory to the wrong product type.
+Generation runs before dev, build, typecheck, and tests; Vite regenerates after
+factory modules are added, changed, or removed. Aliases remain explicit because
+a synonym-to-target relationship cannot be inferred from either declaration.
+
 ### 3.2 The inference chain (`contracts.ts`)
 
-A catalog maps each key to a `FactoryContract` — a pair of Zod schemas
-(context in, result out). Everything else is derived:
+A catalog maps each key to a `FactoryContract` — a validated product type, a
+configurable discriminator property, and a pair of Zod schemas (context in,
+result out). Everything else is derived:
 
 ```
 catalog ──► FactoryCatalogKey        the union of valid keys
@@ -108,11 +126,32 @@ catalog ──► FactoryCatalogKey        the union of valid keys
 
 The input/output split matters: the caller's context is *parsed* before the
 factory sees it, and the factory's raw result is *parsed* before the caller
-sees it. Types model both sides of each parse. Aliases participate fully —
-`create(AIRLINER_FACTORY_ALIAS, …)` infers the passenger types through
-`CanonicalFactoryKey` resolution with zero annotations at the call site.
+sees it. Types model both sides of each parse. Genuine aliases also participate
+fully: `CanonicalFactoryKey` resolves an alias to its target contract with zero
+annotations at the call site. Product types are separate from aliases; they
+describe what a factory returns rather than another name used to select it.
 
-### 3.3 Catalog-parameterized diagnostics
+### 3.3 Product types and discriminated unions
+
+The factory key selects an implementation and therefore selects its precise
+input contract. A freight order cannot contain passenger-only fields because
+`create(factorySet.aircraft.freight, ...)` accepts only the freight schema.
+
+Product types solve the related output-side problem. The aircraft contracts
+use the generated values as literal `type` fields, producing the union
+`Aircraft = Airliner | Freighter`. A check against
+`aircraftType.freighter` narrows the value to `Freighter`; its cargo fields are
+available and airliner-only cabin fields are compile-time errors. The kernel
+preserves each contract's exact product type but does not prescribe the
+domain's result shape or discriminator property name. At contract construction,
+both `z.input<ResultSchema>` and `z.output<ResultSchema>` must carry the exact
+product literal at the selected property. After parsing, the registry checks
+the property again so even a dishonest schema transform fails closed.
+
+The `report` proof domain selects `format` instead of `type`, demonstrating that
+the invariant belongs to the generic contract rather than the aircraft model.
+
+### 3.4 Catalog-parameterized diagnostics
 
 `snapshot()` returns `FactoryRegistrySnapshot<FactoryCatalogKey<Catalog>>` and
 the `onEvent` listener receives `FactoryRegistryEvent<FactoryCatalogKey<…>>`:
@@ -120,7 +159,7 @@ diagnostic keys are narrowed to *your* catalog's key union, so a listener can
 switch over keys exhaustively with compiler checking. The narrowing is safe by
 construction — every emitted key is a registered canonical key.
 
-### 3.4 Where types stop and runtime takes over
+### 3.5 Where types stop and runtime takes over
 
 Inside the registry, the entries map is keyed by runtime strings, so specific
 schema generics are erased at that boundary; a handful of internal casts
@@ -153,8 +192,9 @@ Every `create(key, context, options)` call passes through, in order:
 8. **Execution** — the factory's `create` runs under a deadline with a
    registry-owned `AbortSignal` (linked to the caller's signal; aborted by
    the deadline).
-9. **Result validation** — the contract's result schema parses the output, or
-   `INVALID_FACTORY_RESULT`.
+9. **Result validation** — the contract's result schema parses the output,
+   then the configured discriminator must equal the contract product type, or
+   the call fails with `INVALID_FACTORY_RESULT`.
 10. **Circuit accounting + event emission** — success/failure recorded,
     `creation-succeeded`/`creation-failed` emitted with correlation id.
 
@@ -179,10 +219,13 @@ Loading is lazy and stateful per factory: `idle → loading → ready | failed`.
 A loaded module is **untrusted data** until proven otherwise:
 
 1. Zod parses the module boundary: default export with a callable `create`, a
-   pattern-valid `key`, and semver-valid metadata (`INVALID_FACTORY_MODULE`).
+   pattern-valid `key` and `productType`, and semver-valid metadata
+   (`INVALID_FACTORY_MODULE`).
 2. The exported key must equal the registered key (`FACTORY_KEY_MISMATCH`) —
    a file cannot impersonate another factory.
-3. The registry then captures `create` bound against a frozen receiver built
+3. The exported product type must equal the catalog contract's product type
+   (`FACTORY_PRODUCT_TYPE_MISMATCH`).
+4. The registry then captures `create` bound against a frozen receiver built
    from the validated fields. Later mutation of the module's export object
    changes nothing the registry uses (covered by a mutation-attack test).
 
@@ -313,7 +356,8 @@ All failures are `FactoryRegistryError` with a stable machine-readable `code`
   `UNKNOWN_ALIAS_TARGET`, `INVALID_POLICY`
 - **Lookup**: `UNKNOWN_FACTORY`
 - **Loading**: `MODULE_LOAD_FAILED`, `MODULE_LOAD_TIMEOUT`,
-  `INVALID_FACTORY_MODULE`, `FACTORY_KEY_MISMATCH`
+  `INVALID_FACTORY_MODULE`, `FACTORY_KEY_MISMATCH`,
+  `FACTORY_PRODUCT_TYPE_MISMATCH`
 - **Creation**: `INVALID_EXECUTION_OPTIONS`, `INVALID_FACTORY_CONTEXT`,
   `FACTORY_BUSY`, `CIRCUIT_OPEN`, `FACTORY_CREATION_FAILED`,
   `FACTORY_CREATION_TIMEOUT`, `INVALID_FACTORY_RESULT`, `ABORTED`
@@ -336,12 +380,45 @@ reviewed decision. This is the kernel's semver discipline in executable form.
 
 ---
 
-## 10. How this system reached its current shape
+## 10. Current foundation checkpoint
 
-The kernel was reviewed and hardened across one working session. Recorded
-here because the *reasons* outlive the diffs:
+The foundation is now implemented and exercised as a generic factory kernel,
+not merely described through the aircraft example.
 
-**Three temporal defects found and fixed** (each individually-correct piece
+| Area | Current guarantee | Executable proof |
+| --- | --- | --- |
+| Kernel boundary | `src/factory/` imports no consumer domain and owns no domain vocabulary. | Dependency structure and public-API tests |
+| Discovery | A `src/<namespace>/factories/*.factory.ts` module is the source of truth for its factory name and product type. | Generator fixture tests for additions, removals, ordering, stale output, and invalid declarations |
+| Generated vocabulary | `factorySet`, `productTypeSet`, and `factoryDefinitionSet` provide exact design-time access without a hand-maintained central list. | `npm run codegen:check` and catalog type tests |
+| Identity | Factory keys select implementations; product types classify results; aliases remain optional lookup synonyms. These concepts do not impersonate one another. | Branded-key validation and module/contract mismatch tests |
+| Domain contracts | Each key selects its exact context and result types. The domain chooses the discriminator property and every result branch carries the exact product literal. | Compile-time assertions and strict Zod schemas |
+| Runtime trust | Context, loaded module metadata, raw result, and the parsed result discriminator are all checked before data crosses the registry boundary. | Adversarial registry tests, including a dishonest schema transform |
+| Operations | Lazy-load deduplication, timeouts, aborts, bulkheads, circuit breakers, recovery controls, snapshots, and events have defined behavior. | Deterministic registry tests |
+| Release gate | Generated output, types, behavior, and bundling are checked together. | `npm run verify` |
+
+Two proof domains demonstrate the abstraction boundary:
+
+- `aircraft` uses `type: 'airliner' | 'freighter'` and different passenger and
+  freight input/output shapes.
+- `report` uses `format: 'pdf' | 'csv'`, proving that neither the domain nor the
+  discriminator name is built into the kernel.
+
+Adding a conforming factory module now makes its key and product relationship
+available at design time after generation. No aircraft-specific registry,
+alias list, or product-category list must be edited. A domain catalog still
+owns the meaningful part that cannot be inferred from a filename: its context
+and result schemas, selected discriminator, and resilience policy.
+
+This checkpoint intentionally stops before UI, persistence, remote plugin
+distribution, or package extraction. Those concerns can now be evaluated
+against a stable kernel instead of shaping it prematurely.
+
+### 10.1 How the kernel reached this shape
+
+The kernel was reviewed and hardened across successive foundation passes.
+These details are recorded because the *reasons* outlive the diffs.
+
+**Three temporal defects found and fixed** (each individually correct piece
 composed into an undefined whole):
 
 1. *Aborted probe wedged the circuit.* Aborts are neutral; neutral outcomes
@@ -360,8 +437,14 @@ cheap now and expensive to retrofit): the curated export surface, the event
 hook, and per-factory policies — each landed with a test that first exposes
 the gap it closes, then proves the fix.
 
-**Two type-level refinements**: the template-literal key constraint and
-catalog-parameterized diagnostics (§3.1, §3.3).
+**The vocabulary and product-model pass** removed the hand-maintained factory
+list, separated aliases from product categories, generated each factory's key
+and product relationship, made the result discriminator domain-selectable, and
+added a second non-aircraft proof domain.
+
+**Type-level refinements** include the template-literal key constraint,
+catalog-parameterized diagnostics (§3.1, §3.4), exact context/result inference,
+and compile-time enforcement of each contract's discriminator literal.
 
 **Minor honesty fixes**: half-open `CIRCUIT_OPEN` no longer claims
 `retryAfterMs: 0`; module paths reject whitespace padding; `defineFactoryFor`
@@ -391,8 +474,8 @@ Declared refusals, so they don't arrive later as half-considered changes:
   timed-out work finally settles; late-load repair (`failed → ready` when a
   load beats its cached failure); remaining-time `timeoutMs`; `dispose()`.
 - **Extraction**: workspace split into `packages/factory-kernel` (Zod-only
-  core + `vite` adapter entry) and `examples/aircraft`. File moves and
-  config only; the tests verify nothing broke.
+  core + Vite/codegen adapters) and proof domains under `examples/`. File moves
+  and config only; the tests verify nothing broke.
 
 ---
 
@@ -406,4 +489,4 @@ throwing listeners), type-level guarantees (`expectTypeOf`,
 document claims is intended to have a test whose name states it; a claim
 without a test is a bug in either the docs or the suite.
 
-Commands: `npm run typecheck` · `npm test` · `npm run build`
+Command: `npm run verify` (fresh codegen, typecheck, tests, and production build)

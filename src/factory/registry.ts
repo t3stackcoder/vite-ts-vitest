@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   factoryKeySchema,
+  factoryProductTypeSchema,
   isFactoryAlias,
   isFactoryKey,
   modulePathSchema,
@@ -260,6 +261,7 @@ const factoryModuleBoundarySchema = z.looseObject({
     create: factoryCreateFunctionSchema,
     key: factoryKeySchema,
     metadata: factoryMetadataSchema,
+    productType: factoryProductTypeSchema,
   }),
 })
 
@@ -508,7 +510,35 @@ export class SmartFactoryRegistry<
             )
           }
 
-          return result.data as FactoryResultForLookup<
+          const parsedResult = result.data
+          const hasExpectedProductType =
+            typeof parsedResult === 'object' &&
+            parsedResult !== null &&
+            Object.hasOwn(parsedResult, contract.discriminator) &&
+            Reflect.get(parsedResult, contract.discriminator) ===
+              contract.productType
+
+          if (!hasExpectedProductType) {
+            const actualProductType =
+              typeof parsedResult === 'object' && parsedResult !== null
+                ? Reflect.get(parsedResult, contract.discriminator)
+                : undefined
+
+            throw new FactoryRegistryError(
+              'INVALID_FACTORY_RESULT',
+              `Factory "${canonicalKey}" returned a result whose "${contract.discriminator}" discriminator did not match "${contract.productType}".`,
+              {
+                details: {
+                  actualProductType,
+                  discriminator: contract.discriminator,
+                  expectedProductType: contract.productType,
+                  key: canonicalKey,
+                },
+              },
+            )
+          }
+
+          return parsedResult as FactoryResultForLookup<
             Catalog,
             Aliases,
             Key
@@ -944,16 +974,34 @@ export class SmartFactoryRegistry<
       )
     }
 
+    const contract = Reflect.get(this.#catalog, source.key) as FactoryContract
+    if (validatedFactory.productType !== contract.productType) {
+      throw new FactoryRegistryError(
+        'FACTORY_PRODUCT_TYPE_MISMATCH',
+        `Factory module "${source.modulePath}" declared product type "${validatedFactory.productType}" but its contract declares "${contract.productType}".`,
+        {
+          details: {
+            actualProductType: validatedFactory.productType,
+            expectedProductType: contract.productType,
+            key: source.key,
+            modulePath: source.modulePath,
+          },
+        },
+      )
+    }
+
     const immutableReceiver = Object.freeze({
       create: validatedFactory.create,
       key: validatedFactory.key,
       metadata: validatedFactory.metadata,
+      productType: validatedFactory.productType,
     })
     const capturedCreate = validatedFactory.create.bind(immutableReceiver)
     return Object.freeze({
       create: capturedCreate,
       key: validatedFactory.key,
       metadata: validatedFactory.metadata,
+      productType: validatedFactory.productType,
     }) as CatalogFactory<Catalog>
   }
 
