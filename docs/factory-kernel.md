@@ -171,6 +171,41 @@ Because the `Infer*` chain has no runtime safety net of its own, the test
 suite pins it with `expectTypeOf` assertions and `@ts-expect-error` probes.
 Type refactors fail tests, not consumers.
 
+### 3.6 The authoring boundary (`defineFactoryFor`)
+
+`defineFactoryFor<Catalog>()(key)` is the blessed way to author a factory
+module, and it is where three guarantees are minted:
+
+- **Contextual signature checking.** The implementation's `create` is
+  contextually typed against the key's real catalog contract, so a factory
+  written against the wrong context shape is an editor error in the factory
+  file itself — not a latent runtime surprise hiding behind a glob type
+  assertion.
+- **Eager metadata validation.** Metadata is parsed with the same
+  `factoryMetadataSchema` the module boundary enforces (mirroring
+  `factoryContract`'s eager parse), so a blank display name or bad version
+  throws where the factory is written, not at first load in production.
+  `FactoryMetadata['version']` is additionally compile-screened by a semver
+  template-literal type; the template cannot express the full grammar
+  (integer-only segments, the prerelease/build character set), so the Zod
+  schema stays authoritative — the same screen-vs-schema split as branded
+  keys (§3.1).
+- **Receiver preservation + attestation.** The built factory *delegates* —
+  `create: (context, options) => implementation.create(context, options)` —
+  rather than spreading the implementation, so prototype-held members and
+  `this`-dependent class implementations keep working. The frozen result is
+  stamped with the `DEFINED_FACTORY` marker
+  (`Symbol.for('factory-kernel/defined-factory')`, not part of the public
+  index) that the module boundary requires (§5).
+
+`AbstractFactory.create` declares `this: void`: the registry rebinds `create`
+to a synthetic frozen receiver, and the type states that contract.
+Implementations that declare their `this` dependence are compile-rejected,
+and `this` is unusable inside object-literal implementations. Implicit
+`this` in a class method is invisible to the type system — that residual gap
+is closed by delegation instead: every loadable module was built here, and
+the delegating closure ignores receivers by construction.
+
 ---
 
 ## 4. The runtime pipeline
@@ -218,9 +253,16 @@ Loading is lazy and stateful per factory: `idle → loading → ready | failed`.
 
 A loaded module is **untrusted data** until proven otherwise:
 
-1. Zod parses the module boundary: default export with a callable `create`, a
-   pattern-valid `key` and `productType`, and semver-valid metadata
-   (`INVALID_FACTORY_MODULE`).
+1. Zod parses the module boundary: the default export must carry the
+   `DEFINED_FACTORY` attestation marker that only `defineFactoryFor` stamps
+   (§3.6) — machine-checkable proof that its `create` signature was
+   compile-verified against the real catalog contract — plus a callable
+   `create`, a pattern-valid `key` and `productType`, and semver-valid
+   metadata (`INVALID_FACTORY_MODULE`). The marker refinement runs against
+   the raw export, piped ahead of the object schema, because Zod's object
+   parsing rebuilds values with string keys only and would drop the symbol.
+   `Symbol.for` is deliberately forgeable: the marker targets accidental
+   drift, not hostile code (see honest limits below).
 2. The exported key must equal the registered key (`FACTORY_KEY_MISMATCH`) —
    a file cannot impersonate another factory.
 3. The exported product type must equal the catalog contract's product type
@@ -228,6 +270,9 @@ A loaded module is **untrusted data** until proven otherwise:
 4. The registry then captures `create` bound against a frozen receiver built
    from the validated fields. Later mutation of the module's export object
    changes nothing the registry uses (covered by a mutation-attack test).
+   For a `defineFactoryFor`-built module the captured function is the
+   delegating closure, which ignores receivers — so the rebinding is harmless
+   and implementations keep their own `this` (§3.6).
 
 **Honest limits** (see also README "Trust boundary"): Zod validates a module
 only *after* JavaScript has imported it, so top-level module code has already
@@ -392,7 +437,7 @@ not merely described through the aircraft example.
 | Generated vocabulary | `factorySet`, `productTypeSet`, and `factoryDefinitionSet` provide exact design-time access without a hand-maintained central list. | `npm run codegen:check` and catalog type tests |
 | Identity | Factory keys select implementations; product types classify results; aliases remain optional lookup synonyms. These concepts do not impersonate one another. | Branded-key validation and module/contract mismatch tests |
 | Domain contracts | Each key selects its exact context and result types. The domain chooses the discriminator property and every result branch carries the exact product literal. | Compile-time assertions and strict Zod schemas |
-| Runtime trust | Context, loaded module metadata, raw result, and the parsed result discriminator are all checked before data crosses the registry boundary. | Adversarial registry tests, including a dishonest schema transform |
+| Runtime trust | Authoring attestation, context, loaded module metadata, raw result, and the parsed result discriminator are all checked before data crosses the registry boundary. | Adversarial registry tests, including a dishonest schema transform and forged-attestation modules |
 | Operations | Lazy-load deduplication, timeouts, aborts, bulkheads, circuit breakers, recovery controls, snapshots, and events have defined behavior. | Deterministic registry tests |
 | Release gate | Generated output, types, behavior, and bundling are checked together. | `npm run verify` |
 
@@ -449,6 +494,33 @@ and compile-time enforcement of each contract's discriminator literal.
 **Minor honesty fixes**: half-open `CIRCUIT_OPEN` no longer claims
 `retryAfterMs: 0`; module paths reject whitespace padding; `defineFactoryFor`
 freezes its output; `timeoutMs` semantics documented.
+
+**The type-soundness audit pass** (the "type-system-breaker" mission)
+attacked the kernel's compile-time promises with an adversarial probe suite
+and found four places where the types and the runtime disagreed. All four
+are fixed; the probe suite proved the bugs, then the fixes, and was archived
+out of the tree afterward (the audit report and probes live with the
+project's archived records, not in `src/`):
+
+1. *Receiver rebinding severed `this`.* A structurally conforming
+   class-instance factory crashed — or worse, silently computed a wrong,
+   schema-valid value — through the registry. Fixes: `create(this: void, …)`
+   states the receiver contract, and `defineFactoryFor` delegates instead of
+   spreading (§3.6). One correction surfaced on the way: `this: void` cannot
+   reject *implicit* `this` in class methods, so delegation, not the type
+   screen, is what closes that path.
+2. *`defineFactoryFor` spread dropped prototype members.* The returned
+   object's typed `create` could be `undefined` at runtime. Same delegation
+   fix.
+3. *`create` signatures were never verified.* `import.meta.glob<T>` is an
+   unchecked assertion and the boundary checked only
+   `typeof create === 'function'`; an impersonator written against a foreign
+   context shape returned schema-valid garbage. Fix: the `DEFINED_FACTORY`
+   attestation marker, required at the module boundary (§5).
+4. *`FactoryMetadata` was laxer than the boundary schema.* A fully
+   type-endorsed module could be rejected wholesale at first load. Fix: the
+   semver template-literal screen plus eager metadata parsing at authoring
+   time (§3.6).
 
 ---
 

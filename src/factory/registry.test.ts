@@ -279,6 +279,10 @@ describe('SmartFactoryRegistry', () => {
 
   it('captures an immutable factory wrapper instead of retaining a mutable export', async () => {
     const mutableFactory = {
+      // The attestation marker is deliberately forgeable (Symbol.for): the
+      // boundary targets accidental drift, and the immutability capture must
+      // hold even for a module that forged its way past it.
+      [Symbol.for('factory-kernel/defined-factory')]: true,
       create(context: AlphaContext): AlphaResult {
         return {
           doubled: this.key === ALPHA_FACTORY ? context.value * 2 : -1,
@@ -348,6 +352,9 @@ describe('SmartFactoryRegistry', () => {
         source(ALPHA_FACTORY, 'alpha', async () =>
           untrustedModule({
             default: {
+              // Forged marker: get past the load boundary so the result
+              // validation itself is what this test exercises.
+              [Symbol.for('factory-kernel/defined-factory')]: true,
               create: () => ({ doubled: 'not-a-number', kind: 'alpha' }),
               key: ALPHA_FACTORY,
               metadata: { displayName: 'Untrusted Alpha', version: '1.0.0' },

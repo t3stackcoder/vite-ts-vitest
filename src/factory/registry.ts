@@ -9,6 +9,7 @@ import {
   type FactoryKey,
   type ModulePath,
 } from './brand'
+import { DEFINED_FACTORY, factoryMetadataSchema } from './contracts'
 import type {
   Awaitable,
   CanonicalFactoryKey,
@@ -212,9 +213,6 @@ interface RegistryEntry<Catalog extends FactoryCatalog> {
   state: EntryState<Catalog>
 }
 
-const semanticVersionPattern =
-  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
-
 const boundedDurationSchema = z.number().int().positive().max(3_600_000)
 const failureThresholdSchema = z.number().int().positive().max(1_000)
 const concurrencyLimitSchema = z.number().int().positive().max(10_000)
@@ -228,15 +226,6 @@ const factoryCreateOptionsSchema = z
     correlationId: z.string().trim().min(1).max(256).optional(),
     signal: abortSignalSchema.optional(),
     timeoutMs: boundedDurationSchema.optional(),
-  })
-  .readonly()
-
-const factoryMetadataSchema = z
-  .strictObject({
-    capabilities: z.array(z.string().trim().min(1)).readonly().optional(),
-    description: z.string().optional(),
-    displayName: z.string().trim().min(1),
-    version: z.string().regex(semanticVersionPattern),
   })
   .readonly()
 
@@ -256,13 +245,30 @@ const factoryCreateFunctionSchema = z.custom<CallableFunction>(
   { error: 'Expected a factory create function.' },
 )
 
+/**
+ * The attestation check runs against the raw default export, piped in front
+ * of the object schema: Zod's object parsing rebuilds the value with its
+ * string keys only, so a refinement placed after it would never see the
+ * symbol-keyed marker.
+ */
+const definedFactorySchema = z
+  .custom<Record<string, unknown>>(
+    (value) => typeof value === 'object' && value !== null,
+    { error: 'Expected a factory module default export object.' },
+  )
+  .refine((factory) => Reflect.get(factory, DEFINED_FACTORY) === true, {
+    error: 'Factory modules must be built with defineFactoryFor.',
+  })
+
 const factoryModuleBoundarySchema = z.looseObject({
-  default: z.looseObject({
-    create: factoryCreateFunctionSchema,
-    key: factoryKeySchema,
-    metadata: factoryMetadataSchema,
-    productType: factoryProductTypeSchema,
-  }),
+  default: definedFactorySchema.pipe(
+    z.looseObject({
+      create: factoryCreateFunctionSchema,
+      key: factoryKeySchema,
+      metadata: factoryMetadataSchema,
+      productType: factoryProductTypeSchema,
+    }),
+  ),
 })
 
 function closedCircuit(generation = 0): CircuitState {

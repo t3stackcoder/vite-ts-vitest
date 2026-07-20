@@ -21,12 +21,41 @@ export interface FactoryCreateOptions {
   readonly timeoutMs?: number
 }
 
+/**
+ * Compile-time screen for semantic versions. Template literals cannot express
+ * everything the runtime regex enforces (integer-only segments — floats,
+ * negatives, and extra dotted segments still decompose as `${number}`; the
+ * prerelease/build character set; non-empty prerelease), so the eager parse
+ * in defineFactoryFor and the module boundary schema remain authoritative.
+ */
+export type SemanticVersion =
+  | `${number}.${number}.${number}`
+  | `${number}.${number}.${number}-${string}`
+  | `${number}.${number}.${number}+${string}`
+
 export interface FactoryMetadata {
   readonly capabilities?: readonly string[]
   readonly description?: string
   readonly displayName: string
-  readonly version: string
+  readonly version: SemanticVersion
 }
+
+const semanticVersionPattern =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+
+/**
+ * Shared between defineFactoryFor (eager, at authoring time) and the
+ * registry's module boundary schema (at load time), so the two ends cannot
+ * drift apart again.
+ */
+export const factoryMetadataSchema = z
+  .strictObject({
+    capabilities: z.array(z.string().trim().min(1)).readonly().optional(),
+    description: z.string().optional(),
+    displayName: z.string().trim().min(1),
+    version: z.string().regex(semanticVersionPattern),
+  })
+  .readonly()
 
 export interface AbstractFactory<
   out Key extends FactoryKey,
@@ -37,7 +66,18 @@ export interface AbstractFactory<
   readonly key: Key
   readonly metadata: FactoryMetadata
   readonly productType: ProductType
-  create(context: Context, options?: FactoryCreateOptions): Awaitable<Result>
+  /**
+   * `this: void` states the runtime's actual contract: the registry rebinds
+   * create to a synthetic frozen receiver, so an implementation may not rely
+   * on its receiver. (Implicit `this` in a class method is invisible to this
+   * screen; defineFactoryFor's delegation keeps such implementations working
+   * regardless.)
+   */
+  create(
+    this: void,
+    context: Context,
+    options?: FactoryCreateOptions,
+  ): Awaitable<Result>
 }
 
 export interface FactoryContract<
@@ -312,10 +352,40 @@ export type FactoryForLookup<
   ? FactoryFor<Catalog, Key>
   : never
 
+/**
+ * Attestation marker stamped by defineFactoryFor and required by the
+ * registry's module boundary schema. Because defineFactoryFor contextually
+ * types the implementation's create against the real catalog contract, the
+ * marker is a machine-checkable attestation that the signature was
+ * compile-time-verified — a bare `typeof create === 'function'` check cannot
+ * recover that. Deliberately Symbol.for (forgeable): the boundary targets
+ * accidental drift, not hostile modules, which already require a process
+ * boundary.
+ */
+export const DEFINED_FACTORY = Symbol.for('factory-kernel/defined-factory')
+
 export function defineFactoryFor<Catalog extends FactoryCatalog>() {
   return <Key extends FactoryCatalogKey<Catalog>>(key: Key) =>
     (
       implementation: Omit<FactoryFor<Catalog, Key>, 'key'>,
-    ): FactoryFor<Catalog, Key> =>
-      Object.freeze({ key, ...implementation })
+    ): FactoryFor<Catalog, Key> => {
+      // Mirror factoryContract's eager parse: invalid metadata (bad semver,
+      // blank display name) throws where the factory is written instead of
+      // at first load behind the module boundary.
+      factoryMetadataSchema.parse(implementation.metadata)
+
+      // Delegate rather than spread: a spread copies own enumerable
+      // properties only, silently dropping a prototype-held create (or
+      // metadata/productType), and severs the implementation's receiver.
+      const create: FactoryFor<Catalog, Key>['create'] = (context, options) =>
+        implementation.create(context, options)
+
+      return Object.freeze({
+        [DEFINED_FACTORY]: true,
+        create,
+        key,
+        metadata: implementation.metadata,
+        productType: implementation.productType,
+      })
+    }
 }

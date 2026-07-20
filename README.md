@@ -53,7 +53,10 @@ accepts Vite's loader map instead of trying to accept a runtime glob string.
    discriminator property. Typechecking requires both schema input and output
    to carry that exact product type at that property.
 5. Default-export a factory created by `defineFactoryFor<Catalog>()`, including
-   its declared `productType`.
+   its declared `productType`. This is enforced, not advisory: the module
+   boundary requires the attestation marker `defineFactoryFor` stamps, and a
+   hand-rolled export object is rejected at first load with
+   `INVALID_FACTORY_MODULE`.
 
 `npm run generate:factories` updates the checked-in generated file. It runs
 before dev, build, typecheck, and tests; the Vite development server also
