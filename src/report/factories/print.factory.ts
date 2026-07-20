@@ -1,7 +1,7 @@
 import {
   defineFactoryFor,
   factoryProductType,
-} from '../../factory'
+} from '../../factory-core'
 import {
   PRINT_REPORT_FACTORY,
   type ReportFactoryCatalog,

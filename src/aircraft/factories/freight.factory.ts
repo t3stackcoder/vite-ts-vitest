@@ -1,4 +1,4 @@
-import { defineFactoryFor, factoryProductType } from '../../factory'
+import { defineFactoryFor, factoryProductType } from '../../factory-core'
 import {
   FREIGHT_AIRCRAFT_FACTORY,
   type AircraftFactoryCatalog,

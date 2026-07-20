@@ -23,7 +23,7 @@ afterEach(async () => {
 
 function factorySource(productType) {
   return [
-    "import { factoryProductType } from '../../factory'",
+    "import { factoryProductType } from '../../factory-core'",
     '',
     `export const productType = factoryProductType('${productType}')`,
     '',
@@ -53,7 +53,7 @@ describe('factory vocabulary generator', () => {
 
     const first = await generateFactorySet({ repositoryRoot: root })
     const output = await readFile(
-      path.join(root, 'src', 'factory-set.generated.ts'),
+      path.join(root, 'src', 'generated', 'factory-set.generated.ts'),
       'utf8',
     )
     const second = await generateFactorySet({
@@ -91,7 +91,7 @@ describe('factory vocabulary generator', () => {
 
     await generateFactorySet({ repositoryRoot: root })
     let output = await readFile(
-      path.join(root, 'src', 'factory-set.generated.ts'),
+      path.join(root, 'src', 'generated', 'factory-set.generated.ts'),
       'utf8',
     )
     expect(output).toContain("factoryProductTypeSet(['pdf'])")
@@ -103,7 +103,7 @@ describe('factory vocabulary generator', () => {
 
     await generateFactorySet({ repositoryRoot: root })
     output = await readFile(
-      path.join(root, 'src', 'factory-set.generated.ts'),
+      path.join(root, 'src', 'generated', 'factory-set.generated.ts'),
       'utf8',
     )
     expect(output).toContain("factoryProductTypeSet(['csv', 'pdf'])")
@@ -111,7 +111,7 @@ describe('factory vocabulary generator', () => {
     await rm(addedFactoryPath)
     const removal = await generateFactorySet({ repositoryRoot: root })
     output = await readFile(
-      path.join(root, 'src', 'factory-set.generated.ts'),
+      path.join(root, 'src', 'generated', 'factory-set.generated.ts'),
       'utf8',
     )
     expect(removal.changed).toBe(true)

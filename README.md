@@ -20,8 +20,8 @@ in [docs/factory-kernel.md](docs/factory-kernel.md).
 
 ## Architecture
 
-- `src/factory/` is reusable infrastructure with no aircraft-domain imports.
-- `src/factory-set.generated.ts` is the checked-in, factory-derived vocabulary
+- `src/factory-core/` is reusable infrastructure with no aircraft-domain imports.
+- `src/generated/factory-set.generated.ts` is the checked-in, factory-derived vocabulary
   used for design-time completion such as `factorySet.aircraft.passenger` and
   `productTypeSet.aircraft.airliner`; `factoryDefinitionSet` preserves the
   generated relationship between them.
@@ -118,7 +118,7 @@ immutable diagnostic snapshots.
   factories with different risk profiles (a slow external dependency next to
   pure computation) share one registry without sharing one budget. Unknown
   keys or invalid values fail closed with `INVALID_POLICY`.
-- **Curated exports.** `src/factory/index.ts` re-exports the supported public
+- **Curated exports.** `src/factory-core/index.ts` re-exports the supported public
   surface explicitly; internal schemas and helpers are not part of the
   contract. A public-API test pins the export list so surface changes are
   deliberate.

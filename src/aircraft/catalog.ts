@@ -3,13 +3,13 @@ import {
   factoryDefinitionSet,
   factorySet,
   productTypeSet,
-} from '../factory-set.generated'
+} from '../generated/factory-set.generated'
 import {
   defineFactoryCatalog,
   factoryCatalogEntry,
   factoryContract,
   type Brand,
-} from '../factory'
+} from '../factory-core'
 
 // Canonical keys are generated from *.factory.ts filenames. Every other
 // mention is compiler-checked; an undiscovered name cannot compile.

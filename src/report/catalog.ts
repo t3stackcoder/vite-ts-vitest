@@ -3,12 +3,12 @@ import {
   factoryDefinitionSet,
   factorySet,
   productTypeSet,
-} from '../factory-set.generated'
+} from '../generated/factory-set.generated'
 import {
   defineFactoryCatalog,
   factoryCatalogEntry,
   factoryContract,
-} from '../factory'
+} from '../factory-core'
 
 const reportFactories = factoryDefinitionSet.report
 export const reportType = productTypeSet.report

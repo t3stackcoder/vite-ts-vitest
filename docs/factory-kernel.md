@@ -7,7 +7,7 @@ bulkheads, circuit breakers) — with full type inference from schema to call
 site and push-based operational events.
 
 The aircraft and report domains in `src/aircraft/` and `src/report/` are proof
-implementations, not the product. The kernel is `src/factory/`.
+implementations, not the product. The kernel is `src/factory-core/`.
 
 ---
 
@@ -41,7 +41,7 @@ backed by a runtime check, and every runtime state has a defined exit.**
 └──────────────────────────┬────────────────────────────────┘
                            │ depends on (never the reverse)
 ┌──────────────────────────▼────────────────────────────────┐
-│ Kernel (src/factory/)                                     │
+│ Kernel (src/factory-core/)                                │
 │                                                           │
 │  index.ts      curated public surface (pinned by test)    │
 │  harness.ts    Vite adapter: glob map → registry          │
@@ -100,7 +100,7 @@ one declaration such as
 
 The generator derives three namespace trees from
 `src/<namespace>/factories/*.factory.ts` into
-`src/factory-set.generated.ts`: filenames produce canonical keys such as
+`src/generated/factory-set.generated.ts`: filenames produce canonical keys such as
 `factorySet.aircraft.passenger`, while product declarations produce values
 such as `productTypeSet.aircraft.airliner`. The third tree preserves their
 relationship as `factoryDefinitionSet.aircraft.passenger`. This bridges
@@ -416,7 +416,7 @@ state.
 
 ## 9. Public surface discipline
 
-`src/factory/index.ts` re-exports the supported API explicitly — no
+`src/factory-core/index.ts` re-exports the supported API explicitly — no
 `export *`. Internal schemas and helpers (`normalizeFactoryRegistryError`,
 the brand schemas) are implementation details that can change freely. A
 public-API test pins the exact runtime export list; adding or removing an
@@ -432,7 +432,7 @@ not merely described through the aircraft example.
 
 | Area | Current guarantee | Executable proof |
 | --- | --- | --- |
-| Kernel boundary | `src/factory/` imports no consumer domain and owns no domain vocabulary. | Dependency structure and public-API tests |
+| Kernel boundary | `src/factory-core/` imports no consumer domain and owns no domain vocabulary. | Dependency structure and public-API tests |
 | Discovery | A `src/<namespace>/factories/*.factory.ts` module is the source of truth for its factory name and product type. | Generator fixture tests for additions, removals, ordering, stale output, and invalid declarations |
 | Generated vocabulary | `factorySet`, `productTypeSet`, and `factoryDefinitionSet` provide exact design-time access without a hand-maintained central list. | `npm run codegen:check` and catalog type tests |
 | Identity | Factory keys select implementations; product types classify results; aliases remain optional lookup synonyms. These concepts do not impersonate one another. | Branded-key validation and module/contract mismatch tests |

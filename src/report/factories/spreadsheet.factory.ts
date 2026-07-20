@@ -1,7 +1,7 @@
 import {
   defineFactoryFor,
   factoryProductType,
-} from '../../factory'
+} from '../../factory-core'
 import {
   SPREADSHEET_REPORT_FACTORY,
   type ReportFactoryCatalog,

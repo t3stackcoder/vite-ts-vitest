@@ -2,7 +2,7 @@ import {
   createFilenameKeyResolver,
   factoryHarnessFor,
   type CatalogFactoryModule,
-} from '../factory'
+} from '../factory-core'
 import {
   REPORT_FACTORY_CATALOG,
   REPORT_FACTORY_KEYS_BY_FILE,
