@@ -2,22 +2,25 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   FREIGHT_AIRCRAFT_FACTORY,
   PASSENGER_AIRCRAFT_FACTORY,
+  aircraftFactorySet,
   aircraftOrderId,
   aircraftType,
-  factorySet,
   type Aircraft,
   type Airliner,
   type Freighter,
 } from './catalog'
-import { createAircraftFactoryRegistry } from './registry'
+import {
+  createAircraftFactoryRegistry,
+  getAircraftFactoryRegistry,
+} from './registry'
 
 describe('aircraft factory composition root', () => {
   it('exposes filename-derived keys through the generated namespace set', () => {
-    expect(factorySet.aircraft.passenger).toBe(PASSENGER_AIRCRAFT_FACTORY)
-    expect(factorySet.aircraft.freight).toBe(FREIGHT_AIRCRAFT_FACTORY)
+    expect(aircraftFactorySet.passenger).toBe(PASSENGER_AIRCRAFT_FACTORY)
+    expect(aircraftFactorySet.freight).toBe(FREIGHT_AIRCRAFT_FACTORY)
     expect(aircraftType.airliner).toBe('airliner')
     expect(aircraftType.freighter).toBe('freighter')
-    expectTypeOf(factorySet.aircraft.passenger).toEqualTypeOf<
+    expectTypeOf(aircraftFactorySet.passenger).toEqualTypeOf<
       typeof PASSENGER_AIRCRAFT_FACTORY
     >()
   })
@@ -25,6 +28,8 @@ describe('aircraft factory composition root', () => {
   it('discovers both modules lazily through the literal Vite glob', () => {
     const registry = createAircraftFactoryRegistry()
 
+    // Module paths are matched loosely: their exact spelling is the
+    // bundler's path normalization, not this domain's contract.
     expect(registry.snapshot()).toEqual({
       factories: [
         {
@@ -32,7 +37,7 @@ describe('aircraft factory composition root', () => {
           aliases: [],
           circuit: { consecutiveFailures: 0, status: 'closed' },
           key: FREIGHT_AIRCRAFT_FACTORY,
-          modulePath: './factories/freight.factory.ts',
+          modulePath: expect.stringContaining('freight.factory.ts'),
           status: 'idle',
         },
         {
@@ -40,18 +45,22 @@ describe('aircraft factory composition root', () => {
           aliases: [],
           circuit: { consecutiveFailures: 0, status: 'closed' },
           key: PASSENGER_AIRCRAFT_FACTORY,
-          modulePath: './factories/passenger.factory.ts',
+          modulePath: expect.stringContaining('passenger.factory.ts'),
           status: 'idle',
         },
       ],
     })
   })
 
+  it('memoizes the shared registry behind a lazy accessor', () => {
+    expect(getAircraftFactoryRegistry()).toBe(getAircraftFactoryRegistry())
+  })
+
   it('creates distinct, strongly inferred product families', async () => {
     const registry = createAircraftFactoryRegistry()
 
     const passengerFamily = await registry.create(
-      factorySet.aircraft.passenger,
+      aircraftFactorySet.passenger,
       {
         orderId: aircraftOrderId('AO-100001'),
         rangeNauticalMiles: 5_500,
@@ -81,12 +90,12 @@ describe('aircraft factory composition root', () => {
   it('narrows mixed products by their generated product type', async () => {
     const registry = createAircraftFactoryRegistry()
     const products: Aircraft[] = [
-      await registry.create(factorySet.aircraft.passenger, {
+      await registry.create(aircraftFactorySet.passenger, {
         orderId: aircraftOrderId('AO-100004'),
         rangeNauticalMiles: 5_500,
         seats: 220,
       }),
-      await registry.create(factorySet.aircraft.freight, {
+      await registry.create(aircraftFactorySet.freight, {
         orderId: aircraftOrderId('AO-100005'),
         payloadKilograms: 130_000,
         rangeNauticalMiles: 4_300,
@@ -124,7 +133,7 @@ describe('aircraft factory composition root', () => {
     const registry = createAircraftFactoryRegistry()
 
     await expect(
-      registry.create(factorySet.aircraft.freight, {
+      registry.create(aircraftFactorySet.freight, {
         orderId: aircraftOrderId('AO-100006'),
         payloadKilograms: 130_000,
         rangeNauticalMiles: 4_300,

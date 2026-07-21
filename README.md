@@ -147,9 +147,9 @@ immutable diagnostic snapshots.
 - `snapshot()` reports load state, active creation count, circuit state, and
   stable error codes without exposing executable plugin objects.
 
-All defaults are configurable through `factoryHarnessFor()` or
-`SmartFactoryRegistry`. Invalid policy values and per-call execution options
-fail closed.
+All defaults are configurable through `factoryDomainFor()`,
+`factoryHarnessFor()`, or `SmartFactoryRegistry`. Invalid policy values and
+per-call execution options fail closed.
 
 ## Trust boundary
 

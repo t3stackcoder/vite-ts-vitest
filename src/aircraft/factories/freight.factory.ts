@@ -1,10 +1,5 @@
-import { defineFactoryFor, factoryProductType } from '../../factory-core'
-import {
-  FREIGHT_AIRCRAFT_FACTORY,
-  type AircraftFactoryCatalog,
-} from '../catalog'
-
-const defineAircraftFactory = defineFactoryFor<AircraftFactoryCatalog>()
+import { factoryProductType } from '../../factory-core'
+import { FREIGHT_AIRCRAFT_FACTORY, defineAircraftFactory } from '../catalog'
 
 export const productType = factoryProductType('freighter')
 

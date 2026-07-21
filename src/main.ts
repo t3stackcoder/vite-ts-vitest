@@ -1,8 +1,12 @@
-import { aircraftFactoryRegistry, aircraftOrderId, factorySet } from './aircraft'
+import {
+  aircraftFactorySet,
+  aircraftOrderId,
+  getAircraftFactoryRegistry,
+} from './aircraft'
 
 async function demonstrateDynamicFactoryLoading(): Promise<void> {
-  const aircraft = await aircraftFactoryRegistry.create(
-    factorySet.aircraft.passenger,
+  const aircraft = await getAircraftFactoryRegistry().create(
+    aircraftFactorySet.passenger,
     {
       orderId: aircraftOrderId('AO-000001'),
       rangeNauticalMiles: 5_200,

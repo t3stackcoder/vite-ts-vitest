@@ -1,13 +1,5 @@
-import {
-  defineFactoryFor,
-  factoryProductType,
-} from '../../factory-core'
-import {
-  PRINT_REPORT_FACTORY,
-  type ReportFactoryCatalog,
-} from '../catalog'
-
-const defineReportFactory = defineFactoryFor<ReportFactoryCatalog>()
+import { factoryProductType } from '../../factory-core'
+import { PRINT_REPORT_FACTORY, defineReportFactory } from '../catalog'
 
 export const productType = factoryProductType('pdf')
 

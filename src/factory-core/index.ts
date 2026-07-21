@@ -82,8 +82,11 @@ export type {
   GlobFactorySourceOptions,
   GlobLoaderMap,
 } from './glob'
-export { factoryHarnessFor } from './harness'
-export type { FactoryHarnessOptions } from './harness'
+export { factoryDomainFor, factoryHarnessFor } from './harness'
+export type {
+  FactoryDomainRegistryOptions,
+  FactoryHarnessOptions,
+} from './harness'
 export { SmartFactoryRegistry, smartFactoryRegistryFor } from './registry'
 export type {
   CircuitBreakerOptions,

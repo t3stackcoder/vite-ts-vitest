@@ -1,33 +1,40 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
-  factoryDefinitionSet,
-  factorySet,
+  reportFactoryDefinitionSet,
+  reportFactorySet,
   reportType,
   type CsvReport,
   type PdfReport,
   type Report,
 } from './catalog'
-import { createReportFactoryRegistry } from './registry'
+import {
+  createReportFactoryRegistry,
+  getReportFactoryRegistry,
+} from './registry'
 
 describe('non-aircraft report proof domain', () => {
   it('preserves generated factory-to-product relationships', () => {
-    expect(factoryDefinitionSet.report.print).toEqual({
-      key: factorySet.report.print,
+    expect(reportFactoryDefinitionSet.print).toEqual({
+      key: reportFactorySet.print,
       productType: reportType.pdf,
     })
-    expect(factoryDefinitionSet.report.spreadsheet).toEqual({
-      key: factorySet.report.spreadsheet,
+    expect(reportFactoryDefinitionSet.spreadsheet).toEqual({
+      key: reportFactorySet.spreadsheet,
       productType: reportType.csv,
     })
   })
 
+  it('memoizes the shared registry behind a lazy accessor', () => {
+    expect(getReportFactoryRegistry()).toBe(getReportFactoryRegistry())
+  })
+
   it('infers each report factory input and output independently', async () => {
     const registry = createReportFactoryRegistry()
-    const pdf = await registry.create(factorySet.report.print, {
+    const pdf = await registry.create(reportFactorySet.print, {
       sections: ['Summary', 'Details'],
       title: 'Quarterly report',
     })
-    const csv = await registry.create(factorySet.report.spreadsheet, {
+    const csv = await registry.create(reportFactorySet.spreadsheet, {
       columns: ['name', 'amount'],
       rows: [['North', '42']],
     })
@@ -74,7 +81,7 @@ describe('non-aircraft report proof domain', () => {
     const registry = createReportFactoryRegistry()
 
     await expect(
-      registry.create(factorySet.report.print, {
+      registry.create(reportFactorySet.print, {
         sections: ['Summary'],
         title: 'Strict report',
         // @ts-expect-error - spreadsheet rows are not print-report input

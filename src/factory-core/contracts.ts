@@ -94,8 +94,27 @@ export interface FactoryContract<
 
 export type FactoryCatalog = Readonly<Record<string, FactoryContract>>
 
+/**
+ * Structural check rather than `instanceof z.ZodType`: when a consuming
+ * application resolves a second copy of zod (version skew, failed dedupe),
+ * its schemas are built from a different class identity and instanceof
+ * would reject them at catalog definition time. Presence of the parse
+ * surface the kernel actually invokes is the contract instead.
+ */
 const zodSchemaSchema = z.custom<z.ZodType>(
-  (value) => value instanceof z.ZodType,
+  (value) => {
+    if (typeof value !== 'object' || value === null) {
+      return false
+    }
+    const candidate = value as Partial<
+      Record<'parse' | 'safeParse' | 'safeParseAsync', unknown>
+    >
+    return (
+      typeof candidate.parse === 'function' &&
+      typeof candidate.safeParse === 'function' &&
+      typeof candidate.safeParseAsync === 'function'
+    )
+  },
   { error: 'Expected a Zod schema.' },
 )
 
@@ -137,12 +156,21 @@ export function factoryContract<
 export function defineFactoryCatalog<const Catalog extends FactoryCatalog>(
   catalog: Catalog,
 ): Catalog {
+  const validated: Record<string, FactoryContract> = {}
+
   for (const [key, contract] of Object.entries(catalog)) {
     factoryKeySchema.parse(key)
-    factoryContractDefinitionSchema.parse(contract)
+    validated[key] = Object.freeze(
+      factoryContractDefinitionSchema.parse(contract),
+    ) as FactoryContract
   }
 
-  return Object.freeze(catalog)
+  // The validated copies are adopted, not merely checked: strict parsing
+  // rebuilds each contract from a single read of its properties, so a
+  // hand-built contract (which the type permits) that is mutated — or backed
+  // by getters — after definition cannot change the validation behavior the
+  // registry re-reads on every create().
+  return Object.freeze(validated) as Catalog
 }
 
 export type InferFactoryInput<Contract> = Contract extends {
@@ -370,9 +398,11 @@ export function defineFactoryFor<Catalog extends FactoryCatalog>() {
       implementation: Omit<FactoryFor<Catalog, Key>, 'key'>,
     ): FactoryFor<Catalog, Key> => {
       // Mirror factoryContract's eager parse: invalid metadata (bad semver,
-      // blank display name) throws where the factory is written instead of
-      // at first load behind the module boundary.
+      // blank display name) or an invalid product type throws where the
+      // factory is written instead of at first load behind the module
+      // boundary.
       factoryMetadataSchema.parse(implementation.metadata)
+      factoryProductTypeSchema.parse(implementation.productType)
 
       // Delegate rather than spread: a spread copies own enumerable
       // properties only, silently dropping a prototype-held create (or

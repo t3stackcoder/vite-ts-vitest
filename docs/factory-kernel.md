@@ -46,7 +46,8 @@ backed by a runtime check, and every runtime state has a defined exit.**
 │  index.ts      curated public surface (pinned by test)    │
 │  harness.ts    Vite adapter: glob map → registry          │
 │  glob.ts       loader-map validation, filename→key        │
-│  registry.ts   SmartFactoryRegistry (the engine)          │
+│  registry.ts   SmartFactoryRegistry (orchestration)       │
+│  execution.ts  circuit/bulkhead/timeout engine (internal) │
 │  contracts.ts  catalog, contracts, inference chain        │
 │  brand.ts      branded keys/aliases/paths + validators    │
 │  errors.ts     FactoryRegistryError + stable code enum    │
@@ -56,12 +57,22 @@ backed by a runtime check, and every runtime state has a defined exit.**
 Dependency facts, enforced by construction:
 
 - The kernel imports **nothing** from any domain.
-- The kernel core (`brand`, `contracts`, `errors`, `registry`) depends only on
-  Zod plus standard platform APIs (`AbortSignal`, timers). It runs in any
-  JS runtime.
+- The kernel core (`brand`, `contracts`, `errors`, `execution`, `registry`)
+  depends only on Zod plus standard platform APIs (`AbortSignal`, timers). It
+  runs in any JS runtime.
+- The resilience machinery (circuit breaker, bulkhead, bounded execution)
+  lives in `execution.ts`, an internal per-entry engine the registry
+  composes. Nothing in it depends on the registry, and it is deliberately
+  not part of the public surface.
 - Only `glob.ts`/`harness.ts` are bundler-shaped, and even they never call
   `import.meta.glob` — Vite requires the literal glob at the consumer's
   composition root, so the kernel accepts the resulting loader map instead.
+- `factoryDomainFor(catalog)` packages the composition-root pattern: it
+  returns registry builders that need only the consumer's literal glob map,
+  derives the filename→key resolver from the catalog's own key names (the
+  convention the generator enforces; explicitly overridable), and provides a
+  lazily memoized shared-registry accessor so importing a domain barrel does
+  no work at module evaluation.
 
 ---
 
@@ -124,6 +135,15 @@ catalog ──► FactoryCatalogKey        the union of valid keys
         ──► FactoryResultForLookup   what create() returns   (z.output)
 ```
 
+Contracts are validated *and adopted* at definition time:
+`defineFactoryCatalog` strict-parses each contract and freezes the parsed
+copy, so a hand-built or getter-backed contract mutated after definition
+cannot change what the registry enforces on later `create()` calls. Schemas
+are recognized structurally — by the parse surface the kernel actually
+invokes — rather than by `instanceof`, so a second bundled copy of Zod
+(version skew, failed dedupe) does not invalidate otherwise-correct
+contracts.
+
 The input/output split matters: the caller's context is *parsed* before the
 factory sees it, and the factory's raw result is *parsed* before the caller
 sees it. Types model both sides of each parse. Genuine aliases also participate
@@ -181,10 +201,11 @@ module, and it is where three guarantees are minted:
   written against the wrong context shape is an editor error in the factory
   file itself — not a latent runtime surprise hiding behind a glob type
   assertion.
-- **Eager metadata validation.** Metadata is parsed with the same
-  `factoryMetadataSchema` the module boundary enforces (mirroring
-  `factoryContract`'s eager parse), so a blank display name or bad version
-  throws where the factory is written, not at first load in production.
+- **Eager metadata and product-type validation.** Metadata is parsed with the
+  same `factoryMetadataSchema` the module boundary enforces (mirroring
+  `factoryContract`'s eager parse), and `productType` is parsed with the same
+  pattern schema — so a blank display name, bad version, or invalid product
+  type throws where the factory is written, not at first load in production.
   `FactoryMetadata['version']` is additionally compile-screened by a semver
   template-literal type; the template cannot express the full grammar
   (integer-only segments, the prerelease/build character set), so the Zod
@@ -218,6 +239,11 @@ Every `create(key, context, options)` call passes through, in order:
 3. **Key resolution** — alias → canonical key, or `UNKNOWN_FACTORY`.
 4. **Context validation** — the contract's context schema parses the input
    *before the module chunk loads*. A bad request never triggers a download.
+   The parse itself runs inside the same bounded envelope as the rest of the
+   pipeline: it is cut off by the creation timeout and honors the caller's
+   signal while in flight, so a hanging async refinement cannot stall
+   `create()`. A stalled parse is treated as caller input, not factory
+   health — it never moves the circuit.
 5. **Module load** (lazy, cached, deduplicated) — see §5. The caller's abort
    signal is honored *during* the load: the caller rejects immediately while
    the shared load continues for others.
@@ -331,8 +357,9 @@ work cannot corrupt the counter.
 - The factory receives a registry-owned signal that aborts on deadline *or*
   caller abort. `timeoutMs` as received by a factory is the total budget, not
   remaining time — the signal is the authoritative deadline.
-- Caller aborts are honored at every stage: before work, during module load
-  (without cancelling the shared load), and during execution.
+- Caller aborts are honored at every stage: before work, during context
+  validation, during module load (without cancelling the shared load), and
+  during execution.
 
 ### 6.4 Per-factory policy overrides
 
@@ -357,7 +384,7 @@ only; caller input errors are reported solely to the offending caller.
 
 | Event                 | Payload beyond `key`        | Fired when                                 |
 | --------------------- | --------------------------- | ------------------------------------------ |
-| `factory-loaded`      | —                           | module import + validation succeeded       |
+| `factory-loaded`      | —                           | module import + validation succeeded, adopted |
 | `factory-load-failed` | `code`                      | load failed / timed out / failed validation|
 | `creation-succeeded`  | `correlationId?`            | validated result returned to caller        |
 | `creation-failed`     | `code`, `correlationId?`    | any creation rejection, incl. busy/open    |
@@ -369,9 +396,15 @@ only; caller input errors are reported solely to the offending caller.
 | `circuit-reset`       | —                           | operator called `resetCircuit()`           |
 | `concurrency-reset`   | —                           | operator called `resetConcurrency()`       |
 
+Load events fire only for results the registry *adopted*: a load superseded
+mid-flight by `invalidate()` (revision advanced) emits neither
+`factory-loaded` nor `factory-load-failed`, so the event stream never
+disagrees with `snapshot()`.
+
 ### 7.2 Snapshot (pull)
 
-`snapshot()` returns an immutable, deterministic (sorted) view per factory:
+`snapshot()` returns an immutable, deterministic view per factory — sorted by
+code units, so ordering is host-locale-independent:
 load status, active creations, circuit state with consecutive failures,
 aliases, module path, and the stable error code when failed. It exposes no
 executable objects — diagnostics cannot become an injection surface.
@@ -412,6 +445,15 @@ Registration is atomic: a batch of sources (or aliases) is fully validated
 before any of it is committed, so a failed `register()` leaves no partial
 state.
 
+The Vite harness additionally asserts **catalog coverage** at composition
+time: every catalog key must have received a glob-discovered module
+(`INVALID_SOURCE` listing the uncovered keys; opt out with `allowEmpty`).
+Without this, a factory file that drops out of the glob pattern — moved into
+a subdirectory a non-recursive pattern no longer matches — would be the one
+misconfiguration to escape composition time and surface only as
+`UNKNOWN_FACTORY` at first `create()`. `register()` on the raw registry
+stays incremental; the coverage contract belongs to the harness.
+
 ---
 
 ## 9. Public surface discipline
@@ -433,7 +475,7 @@ not merely described through the aircraft example.
 | Area | Current guarantee | Executable proof |
 | --- | --- | --- |
 | Kernel boundary | `src/factory-core/` imports no consumer domain and owns no domain vocabulary. | Dependency structure and public-API tests |
-| Discovery | A `src/<namespace>/factories/*.factory.ts` module is the source of truth for its factory name and product type. | Generator fixture tests for additions, removals, ordering, stale output, and invalid declarations |
+| Discovery | A `src/<namespace>/factories/*.factory.ts` module is the source of truth for its factory name and product type, and the harness fails composition if any catalog key lacks a discovered module. | Generator fixture tests for additions, removals, ordering, stale output, and invalid declarations; harness catalog-coverage tests |
 | Generated vocabulary | `factorySet`, `productTypeSet`, and `factoryDefinitionSet` provide exact design-time access without a hand-maintained central list. | `npm run codegen:check` and catalog type tests |
 | Identity | Factory keys select implementations; product types classify results; aliases remain optional lookup synonyms. These concepts do not impersonate one another. | Branded-key validation and module/contract mismatch tests |
 | Domain contracts | Each key selects its exact context and result types. The domain chooses the discriminator property and every result branch carries the exact product literal. | Compile-time assertions and strict Zod schemas |
@@ -521,6 +563,56 @@ project's archived records, not in `src/`):
    type-endorsed module could be rejected wholesale at first load. Fix: the
    semver template-literal screen plus eager metadata parsing at authoring
    time (§3.6).
+
+**The external-audit remediation pass** subjected `factory-core` and
+`aircraft` to a staff-level architectural audit and fixed all sixteen
+findings. The two Majors were both cracks in the bounded-execution story:
+
+1. *Context validation ran outside the envelope `create()` promises.* Module
+   loads and factory runs were deadline-bounded and abortable, but a context
+   schema with a hanging async refinement stalled a call forever — the
+   caller's signal was polled before and after the parse, never during. Fix:
+   the parse is wrapped in the creation timeout and an abort race (§4 step 4);
+   a stalled parse never counts against the circuit.
+2. *Nothing verified glob discovery covered the catalog.* Every other
+   misconfiguration failed at composition time; a factory file that dropped
+   out of a non-recursive glob pattern surfaced only as runtime
+   `UNKNOWN_FACTORY`. Fix: the harness catalog-coverage assertion (§8).
+
+The remaining findings, in the same pass: `defineFactoryCatalog` adopts
+frozen validated contract copies instead of live references (§3.2); Zod
+schemas are recognized structurally rather than by cross-copy-fragile
+`instanceof` (§3.2); load events are suppressed for revisions superseded by
+`invalidate()`, keeping telemetry consistent with `snapshot()` (§7.1); the
+circuit/bulkhead/timeout engine moved into the internal `execution.ts`
+collaborator with the public API unchanged (§2); all orderings are
+code-unit-based rather than host-locale-dependent; the constructor routes
+registration through a private helper so a subclass override cannot run
+before its own field initializers; `defineFactoryFor` eagerly parses
+`productType` alongside metadata (§3.6); the eager-glob mistake is named in
+its error message; kernel JSDoc uses a neutral example namespace; and both
+proof domains replaced eager module-scope registry singletons with lazy
+memoized accessors and re-export only their own slice of the generated
+vocabulary.
+
+**The composition-root consolidation pass** followed directly from the
+audit's second-domain question: with `report` proving the seams generic, the
+two domains' composition roots had converged on forty near-identical lines
+each. The repetition was scaffold, not payload — harness wiring,
+filename-resolver construction, and the lazy shared-registry accessor — so
+it moved into the kernel as `factoryDomainFor(catalog)` (§2), whose builders
+need only the consumer's literal glob map (the one piece Vite forces to stay
+at the consumer). The filename→key map is no longer hand-exported by each
+catalog: it is derived from the catalog's own key names — the convention the
+generator already enforces — with an explicit `keyFromPath` override and a
+fail-fast `INVALID_SOURCE` when two keys share a stem, since two keys cannot
+both map to one filename. Each catalog also curries `defineFactoryFor` once
+(`defineAircraftFactory`, `defineReportFactory`) so factory modules stop
+re-deriving it. This was a deliberate public-surface addition — the pin test
+changed with it, exactly as §9 intends — justified by the extraction goal
+rather than the rule of three: every future consumer of the packaged kernel
+writes the glob literal, two exports, and its schemas instead of forty lines
+of ceremony, and the helper is the natural quick-start API for the package.
 
 ---
 

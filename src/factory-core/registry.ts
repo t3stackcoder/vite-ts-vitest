@@ -34,6 +34,18 @@ import {
   normalizeFactoryRegistryError,
   type FactoryRegistryErrorCode,
 } from './errors'
+import {
+  FactoryEntryExecution,
+  assertNotAborted,
+  awaitWithAbort,
+  runWithExecutionControls,
+  withTimeout,
+  type CircuitPermit,
+  type FactoryCircuitSnapshot,
+  type FactoryEntryPolicy,
+} from './execution'
+
+export type { FactoryCircuitSnapshot, FactoryCircuitStatus } from './execution'
 
 const DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
 const DEFAULT_CIRCUIT_RESET_TIMEOUT_MS = 30_000
@@ -42,12 +54,6 @@ const DEFAULT_LOAD_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_CONCURRENT_CREATIONS = 16
 
 export type FactoryLoadStatus = 'failed' | 'idle' | 'loading' | 'ready'
-export type FactoryCircuitStatus = 'closed' | 'half-open' | 'open'
-
-export interface FactoryCircuitSnapshot {
-  readonly consecutiveFailures: number
-  readonly status: FactoryCircuitStatus
-}
 
 export interface FactoryRegistrationSnapshot<
   Key extends FactoryKey = FactoryKey,
@@ -169,45 +175,8 @@ type EntryState<Catalog extends FactoryCatalog> =
   | { readonly factory: CatalogFactory<Catalog>; readonly status: 'ready' }
   | { readonly error: FactoryRegistryError; readonly status: 'failed' }
 
-type CircuitState =
-  | {
-      readonly consecutiveFailures: number
-      readonly generation: number
-      readonly status: 'closed'
-    }
-  | {
-      readonly consecutiveFailures: number
-      readonly generation: number
-      readonly openedAt: number
-      readonly status: 'open'
-    }
-  | {
-      readonly consecutiveFailures: number
-      readonly generation: number
-      readonly openedAt: number
-      readonly probeToken: symbol
-      readonly status: 'half-open'
-    }
-
-type CircuitPermit =
-  | { readonly generation: number; readonly kind: 'closed' }
-  | {
-      readonly generation: number
-      readonly kind: 'half-open'
-      readonly probeToken: symbol
-    }
-
-interface FactoryEntryPolicy {
-  readonly circuitFailureThreshold: number
-  readonly circuitResetTimeoutMs: number
-  readonly creationTimeoutMs: number
-  readonly maxConcurrentCreations: number
-}
-
 interface RegistryEntry<Catalog extends FactoryCatalog> {
-  activeCreations: number
-  circuit: CircuitState
-  readonly policy: FactoryEntryPolicy
+  readonly execution: FactoryEntryExecution
   revision: number
   readonly source: RuntimeSource<Catalog>
   state: EntryState<Catalog>
@@ -271,12 +240,15 @@ const factoryModuleBoundarySchema = z.looseObject({
   ),
 })
 
-function closedCircuit(generation = 0): CircuitState {
-  return {
-    consecutiveFailures: 0,
-    generation,
-    status: 'closed',
+/** Host-locale-independent ordering for deterministic reports/snapshots. */
+function compareCodeUnits(left: string, right: string): number {
+  if (left < right) {
+    return -1
   }
+  if (left > right) {
+    return 1
+  }
+  return 0
 }
 
 export class SmartFactoryRegistry<
@@ -323,7 +295,10 @@ export class SmartFactoryRegistry<
       this.#registerPolicies(options.policies)
     }
 
-    this.register(options.sources)
+    // The private helper, not the public register(): the class is not
+    // designed for extension, but a subclass override must not run before
+    // the subclass's own field initializers.
+    this.#register(options.sources)
 
     if (options.aliases !== undefined) {
       this.#registerAliases(options.aliases)
@@ -331,6 +306,10 @@ export class SmartFactoryRegistry<
   }
 
   register(sources: readonly FactorySource<Catalog>[]): void {
+    this.#register(sources)
+  }
+
+  #register(sources: readonly FactorySource<Catalog>[]): void {
     const pending = new Map<string, RuntimeSource<Catalog>>()
     const occupiedPaths = new Set(
       [...this.#entries.values()].map((entry) => entry.source.modulePath),
@@ -392,9 +371,13 @@ export class SmartFactoryRegistry<
 
     for (const [key, source] of pending) {
       this.#entries.set(key, {
-        activeCreations: 0,
-        circuit: closedCircuit(),
-        policy: this.#entryPolicy(key),
+        execution: new FactoryEntryExecution({
+          emit: (event) => {
+            this.#emit(event)
+          },
+          key: source.key,
+          policy: this.#entryPolicy(key),
+        }),
         revision: 0,
         source,
         state: { status: 'idle' },
@@ -435,13 +418,29 @@ export class SmartFactoryRegistry<
     options: FactoryCreateOptions = {},
   ): Promise<FactoryResultForLookup<Catalog, Aliases, Key>> {
     const executionOptions = this.#executionOptions(options, key)
-    this.#assertNotAborted(key, executionOptions.signal)
+    assertNotAborted(key, executionOptions.signal)
     const canonicalKey = this.#resolveCanonicalKey(key)
     const entry = this.#requiredEntry(canonicalKey)
     const executionTimeoutMs =
-      executionOptions.timeoutMs ?? entry.policy.creationTimeoutMs
+      executionOptions.timeoutMs ?? entry.execution.policy.creationTimeoutMs
     const contract = this.#requiredContract(canonicalKey)
-    const contextResult = await contract.contextSchema.safeParseAsync(context)
+    // Context validation runs before the module load, but never outside the
+    // bounded envelope create() promises: a hanging async refinement is cut
+    // off by the creation timeout, and the caller's signal is honored while
+    // the parse is in flight, not only polled before and after it.
+    const contextResult = await awaitWithAbort(
+      withTimeout(
+        contract.contextSchema.safeParseAsync(context),
+        executionTimeoutMs,
+        new FactoryRegistryError(
+          'FACTORY_CREATION_TIMEOUT',
+          `Context validation for factory "${canonicalKey}" exceeded ${executionTimeoutMs}ms.`,
+          { details: { key: canonicalKey, timeoutMs: executionTimeoutMs } },
+        ),
+      ),
+      key,
+      executionOptions.signal,
+    )
 
     if (!contextResult.success) {
       throw new FactoryRegistryError(
@@ -454,24 +453,20 @@ export class SmartFactoryRegistry<
       )
     }
 
-    this.#assertNotAborted(key, executionOptions.signal)
-    const factory = await this.#awaitWithAbort(
+    assertNotAborted(key, executionOptions.signal)
+    const factory = await awaitWithAbort(
       this.#loadFactory(canonicalKey),
       key,
       executionOptions.signal,
     )
-    this.#assertNotAborted(key, executionOptions.signal)
-    const releaseSlot = this.#acquireExecutionSlot(
-      entry,
-      canonicalKey,
+    assertNotAborted(key, executionOptions.signal)
+    const releaseSlot = entry.execution.acquireSlot(
       executionOptions.correlationId,
     )
 
     let circuitPermit: CircuitPermit
     try {
-      circuitPermit = this.#acquireCircuitPermit(
-        entry,
-        canonicalKey,
+      circuitPermit = entry.execution.acquireCircuitPermit(
         executionOptions.correlationId,
       )
     } catch (error) {
@@ -485,7 +480,7 @@ export class SmartFactoryRegistry<
     ) => Awaitable<FactoryRawResultForLookup<Catalog, Aliases, Key>>
 
     try {
-      const validatedResult = await this.#runWithExecutionControls(
+      const validatedResult = await runWithExecutionControls(
         key,
         executionTimeoutMs,
         executionOptions,
@@ -552,7 +547,7 @@ export class SmartFactoryRegistry<
         },
       )
 
-      this.#recordCircuitSuccess(entry, circuitPermit)
+      entry.execution.recordCircuitSuccess(circuitPermit)
       this.#emit({
         ...(executionOptions.correlationId === undefined
           ? {}
@@ -564,9 +559,9 @@ export class SmartFactoryRegistry<
     } catch (cause) {
       const error = this.#normalizeExecutionError(cause, canonicalKey)
       if (this.#countsTowardCircuit(error)) {
-        this.#recordCircuitFailure(entry, circuitPermit)
+        entry.execution.recordCircuitFailure(circuitPermit)
       } else {
-        this.#releaseCircuitProbe(entry, circuitPermit)
+        entry.execution.releaseCircuitProbe(circuitPermit)
       }
       this.#emit({
         ...(executionOptions.correlationId === undefined
@@ -616,7 +611,7 @@ export class SmartFactoryRegistry<
   resetCircuit(key: FactoryKey | FactoryAlias): void {
     const canonicalKey = this.#resolveCanonicalKey(key)
     const entry = this.#requiredEntry(canonicalKey)
-    entry.circuit = closedCircuit(entry.circuit.generation + 1)
+    entry.execution.resetCircuit()
     this.#emit({ key: canonicalKey, type: 'circuit-reset' })
   }
 
@@ -630,7 +625,7 @@ export class SmartFactoryRegistry<
   resetConcurrency(key: FactoryKey | FactoryAlias): void {
     const canonicalKey = this.#resolveCanonicalKey(key)
     const entry = this.#requiredEntry(canonicalKey)
-    entry.activeCreations = 0
+    entry.execution.resetConcurrency()
     this.#emit({ key: canonicalKey, type: 'concurrency-reset' })
   }
 
@@ -664,8 +659,8 @@ export class SmartFactoryRegistry<
       }),
     )
 
-    loaded.sort((left, right) => left.localeCompare(right))
-    failed.sort((left, right) => left.key.localeCompare(right.key))
+    loaded.sort(compareCodeUnits)
+    failed.sort((left, right) => compareCodeUnits(left.key, right.key))
 
     return Object.freeze({
       failed: Object.freeze(failed),
@@ -678,17 +673,14 @@ export class SmartFactoryRegistry<
       const aliases = [...this.#aliasTargets.entries()]
         .filter(([, target]) => target === entry.source.key)
         .map(([alias]) => alias as FactoryAlias)
-        .sort((left, right) => left.localeCompare(right))
+        .sort(compareCodeUnits)
       const errorCode =
         entry.state.status === 'failed' ? entry.state.error.code : undefined
 
       return Object.freeze({
-        activeCreations: entry.activeCreations,
+        activeCreations: entry.execution.activeCreations,
         aliases: Object.freeze(aliases),
-        circuit: Object.freeze({
-          consecutiveFailures: entry.circuit.consecutiveFailures,
-          status: entry.circuit.status,
-        }),
+        circuit: entry.execution.circuit,
         ...(errorCode === undefined ? {} : { errorCode }),
         key: entry.source.key,
         modulePath: entry.source.modulePath,
@@ -696,7 +688,7 @@ export class SmartFactoryRegistry<
       })
     })
 
-    factories.sort((left, right) => left.key.localeCompare(right.key))
+    factories.sort((left, right) => compareCodeUnits(left.key, right.key))
     // Registered keys are catalog keys by construction.
     return Object.freeze({
       factories: Object.freeze(factories),
@@ -884,10 +876,13 @@ export class SmartFactoryRegistry<
     const revision = entry.revision
     const promise = this.#importFactory(entry.source).then(
       (factory) => {
+        // A revision advanced by invalidate() means this load was
+        // superseded: the registry does not adopt the result, so no load
+        // event is emitted either — telemetry must agree with snapshot().
         if (entry.revision === revision) {
           entry.state = { factory, status: 'ready' }
+          this.#emit({ key: entry.source.key, type: 'factory-loaded' })
         }
-        this.#emit({ key: entry.source.key, type: 'factory-loaded' })
         return factory
       },
       (error: unknown) => {
@@ -896,12 +891,12 @@ export class SmartFactoryRegistry<
           entry.state = this.#cacheFailures
             ? { error: normalizedError, status: 'failed' }
             : { status: 'idle' }
+          this.#emit({
+            code: normalizedError.code,
+            key: entry.source.key,
+            type: 'factory-load-failed',
+          })
         }
-        this.#emit({
-          code: normalizedError.code,
-          key: entry.source.key,
-          type: 'factory-load-failed',
-        })
         throw normalizedError
       },
     )
@@ -926,7 +921,7 @@ export class SmartFactoryRegistry<
       },
     )
 
-    return this.#withTimeout(operation, this.#loadTimeoutMs, timeoutError)
+    return withTimeout(operation, this.#loadTimeoutMs, timeoutError)
   }
 
   async #loadAndValidateFactory(
@@ -1011,213 +1006,6 @@ export class SmartFactoryRegistry<
     }) as CatalogFactory<Catalog>
   }
 
-  #acquireExecutionSlot(
-    entry: RegistryEntry<Catalog>,
-    key: FactoryKey,
-    correlationId?: string,
-  ): () => void {
-    if (entry.activeCreations >= entry.policy.maxConcurrentCreations) {
-      this.#emit({
-        ...(correlationId === undefined ? {} : { correlationId }),
-        code: 'FACTORY_BUSY',
-        key,
-        type: 'creation-failed',
-      })
-      throw new FactoryRegistryError(
-        'FACTORY_BUSY',
-        `Factory "${key}" reached its concurrency limit.`,
-        {
-          details: {
-            activeCreations: entry.activeCreations,
-            key,
-            maxConcurrentCreations: entry.policy.maxConcurrentCreations,
-          },
-        },
-      )
-    }
-
-    entry.activeCreations += 1
-    let released = false
-    return () => {
-      if (!released) {
-        released = true
-        // resetConcurrency() may have already reclaimed this slot.
-        entry.activeCreations = Math.max(0, entry.activeCreations - 1)
-      }
-    }
-  }
-
-  #acquireCircuitPermit(
-    entry: RegistryEntry<Catalog>,
-    key: FactoryKey,
-    correlationId?: string,
-  ): CircuitPermit {
-    const circuit = entry.circuit
-    const rejectCreation = (retryAfterMs?: number): FactoryRegistryError => {
-      this.#emit({
-        ...(correlationId === undefined ? {} : { correlationId }),
-        code: 'CIRCUIT_OPEN',
-        key,
-        type: 'creation-failed',
-      })
-      return this.#circuitOpenError(key, retryAfterMs)
-    }
-
-    if (circuit.status === 'closed') {
-      return { generation: circuit.generation, kind: 'closed' }
-    }
-
-    // A probe is already in flight; no retry delay can be promised.
-    if (circuit.status === 'half-open') {
-      throw rejectCreation()
-    }
-
-    const elapsedMs = Date.now() - circuit.openedAt
-    if (elapsedMs < entry.policy.circuitResetTimeoutMs) {
-      throw rejectCreation(entry.policy.circuitResetTimeoutMs - elapsedMs)
-    }
-
-    const probeToken = Symbol('factory-circuit-probe')
-    const generation = circuit.generation + 1
-    entry.circuit = {
-      consecutiveFailures: circuit.consecutiveFailures,
-      generation,
-      openedAt: circuit.openedAt,
-      probeToken,
-      status: 'half-open',
-    }
-    this.#emit({ key, type: 'circuit-probed' })
-    return { generation, kind: 'half-open', probeToken }
-  }
-
-  /**
-   * Returns a half-open circuit to the open state when its probe ends with a
-   * neutral outcome (for example a caller abort) that says nothing about
-   * factory health. The original openedAt is preserved, so the reset window
-   * has already elapsed and the next creation is admitted as a fresh probe.
-   */
-  #releaseCircuitProbe(
-    entry: RegistryEntry<Catalog>,
-    permit: CircuitPermit,
-  ): void {
-    const circuit = entry.circuit
-
-    if (
-      permit.kind === 'half-open' &&
-      circuit.status === 'half-open' &&
-      circuit.generation === permit.generation &&
-      circuit.probeToken === permit.probeToken
-    ) {
-      entry.circuit = {
-        consecutiveFailures: circuit.consecutiveFailures,
-        generation: circuit.generation + 1,
-        openedAt: circuit.openedAt,
-        status: 'open',
-      }
-      this.#emit({ key: entry.source.key, type: 'circuit-re-armed' })
-    }
-  }
-
-  #recordCircuitSuccess(
-    entry: RegistryEntry<Catalog>,
-    permit: CircuitPermit,
-  ): void {
-    const circuit = entry.circuit
-
-    if (
-      permit.kind === 'half-open' &&
-      circuit.status === 'half-open' &&
-      circuit.generation === permit.generation &&
-      circuit.probeToken === permit.probeToken
-    ) {
-      entry.circuit = closedCircuit(circuit.generation + 1)
-      this.#emit({ key: entry.source.key, type: 'circuit-closed' })
-      return
-    }
-
-    if (
-      permit.kind === 'closed' &&
-      circuit.status === 'closed' &&
-      circuit.generation === permit.generation &&
-      circuit.consecutiveFailures !== 0
-    ) {
-      entry.circuit = closedCircuit(circuit.generation)
-    }
-  }
-
-  #recordCircuitFailure(
-    entry: RegistryEntry<Catalog>,
-    permit: CircuitPermit,
-  ): void {
-    const circuit = entry.circuit
-
-    if (
-      permit.kind === 'half-open' &&
-      circuit.status === 'half-open' &&
-      circuit.generation === permit.generation &&
-      circuit.probeToken === permit.probeToken
-    ) {
-      const consecutiveFailures = circuit.consecutiveFailures + 1
-      entry.circuit = {
-        consecutiveFailures,
-        generation: circuit.generation + 1,
-        openedAt: Date.now(),
-        status: 'open',
-      }
-      this.#emit({
-        consecutiveFailures,
-        key: entry.source.key,
-        type: 'circuit-opened',
-      })
-      return
-    }
-
-    if (
-      permit.kind !== 'closed' ||
-      circuit.status !== 'closed' ||
-      circuit.generation !== permit.generation
-    ) {
-      return
-    }
-
-    const consecutiveFailures = circuit.consecutiveFailures + 1
-    if (consecutiveFailures >= entry.policy.circuitFailureThreshold) {
-      entry.circuit = {
-        consecutiveFailures,
-        generation: circuit.generation + 1,
-        openedAt: Date.now(),
-        status: 'open',
-      }
-      this.#emit({
-        consecutiveFailures,
-        key: entry.source.key,
-        type: 'circuit-opened',
-      })
-    } else {
-      entry.circuit = {
-        consecutiveFailures,
-        generation: circuit.generation,
-        status: 'closed',
-      }
-    }
-  }
-
-  #circuitOpenError(
-    key: FactoryKey,
-    retryAfterMs?: number,
-  ): FactoryRegistryError {
-    return new FactoryRegistryError(
-      'CIRCUIT_OPEN',
-      `Factory "${key}" is temporarily unavailable because its circuit is open.`,
-      {
-        details: {
-          key,
-          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-        },
-      },
-    )
-  }
-
   #executionOptions(
     options: FactoryCreateOptions,
     key: FactoryKey | FactoryAlias,
@@ -1243,134 +1031,6 @@ export class SmartFactoryRegistry<
         : { timeoutMs: result.data.timeoutMs }),
     }
     return Object.freeze(normalized)
-  }
-
-  #runWithExecutionControls<Value>(
-    key: FactoryKey | FactoryAlias,
-    timeoutMs: number,
-    options: FactoryCreateOptions,
-    onWorkSettled: () => void,
-    run: (effectiveOptions: FactoryCreateOptions) => Awaitable<Value>,
-  ): Promise<Value> {
-    return new Promise<Value>((resolve, reject) => {
-      const controller = new AbortController()
-      let settled = false
-      let workSettled = false
-      let timeout: ReturnType<typeof setTimeout> | undefined
-
-      const cleanup = (): void => {
-        if (timeout !== undefined) {
-          clearTimeout(timeout)
-        }
-        options.signal?.removeEventListener('abort', onUserAbort)
-      }
-      const settleWork = (): void => {
-        if (!workSettled) {
-          workSettled = true
-          onWorkSettled()
-        }
-      }
-      const resolveOnce = (value: Value): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        cleanup()
-        resolve(value)
-      }
-      const rejectOnce = (reason: unknown): void => {
-        if (settled) {
-          return
-        }
-        settled = true
-        cleanup()
-        reject(reason)
-      }
-      const onUserAbort = (): void => {
-        const signal = options.signal
-        if (signal === undefined) {
-          return
-        }
-        controller.abort(signal.reason)
-        rejectOnce(this.#abortedError(key, signal))
-      }
-
-      options.signal?.addEventListener('abort', onUserAbort, { once: true })
-      if (options.signal?.aborted === true) {
-        onUserAbort()
-        settleWork()
-        return
-      }
-
-      timeout = setTimeout(() => {
-        const error = new FactoryRegistryError(
-          'FACTORY_CREATION_TIMEOUT',
-          `Factory creation for "${key}" exceeded ${timeoutMs}ms.`,
-          { details: { key, timeoutMs } },
-        )
-        controller.abort(error)
-        rejectOnce(error)
-      }, timeoutMs)
-
-      const effectiveOptions: FactoryCreateOptions = Object.freeze({
-        ...options,
-        signal: controller.signal,
-        timeoutMs,
-      })
-
-      let operation: Awaitable<Value>
-      try {
-        operation = run(effectiveOptions)
-      } catch (error) {
-        settleWork()
-        rejectOnce(error)
-        return
-      }
-
-      Promise.resolve(operation).then(
-        (value) => {
-          settleWork()
-          resolveOnce(value)
-        },
-        (error: unknown) => {
-          settleWork()
-          rejectOnce(error)
-        },
-      )
-    })
-  }
-
-  #withTimeout<Value>(
-    operation: Promise<Value>,
-    timeoutMs: number,
-    timeoutError: FactoryRegistryError,
-  ): Promise<Value> {
-    return new Promise<Value>((resolve, reject) => {
-      let settled = false
-      const timeout = setTimeout(() => {
-        if (!settled) {
-          settled = true
-          reject(timeoutError)
-        }
-      }, timeoutMs)
-
-      operation.then(
-        (value) => {
-          if (!settled) {
-            settled = true
-            clearTimeout(timeout)
-            resolve(value)
-          }
-        },
-        (error: unknown) => {
-          if (!settled) {
-            settled = true
-            clearTimeout(timeout)
-            reject(error)
-          }
-        },
-      )
-    })
   }
 
   #normalizeExecutionError(
@@ -1401,65 +1061,6 @@ export class SmartFactoryRegistry<
     )
   }
 
-  /**
-   * Rejects this caller as soon as their signal aborts, without cancelling
-   * the shared operation (other callers may be awaiting the same load). The
-   * abandoned operation's eventual rejection is silenced to avoid an
-   * unhandled-rejection report when no caller remains.
-   */
-  #awaitWithAbort<Value>(
-    operation: Promise<Value>,
-    key: FactoryKey | FactoryAlias,
-    signal: AbortSignal | undefined,
-  ): Promise<Value> {
-    if (signal === undefined) {
-      return operation
-    }
-
-    if (signal.aborted) {
-      operation.catch(() => {})
-      return Promise.reject(this.#abortedError(key, signal))
-    }
-
-    return new Promise<Value>((resolve, reject) => {
-      const onAbort = (): void => {
-        operation.catch(() => {})
-        reject(this.#abortedError(key, signal))
-      }
-
-      signal.addEventListener('abort', onAbort, { once: true })
-      operation.then(
-        (value) => {
-          signal.removeEventListener('abort', onAbort)
-          resolve(value)
-        },
-        (error: unknown) => {
-          signal.removeEventListener('abort', onAbort)
-          reject(error)
-        },
-      )
-    })
-  }
-
-  #assertNotAborted(
-    key: FactoryKey | FactoryAlias,
-    signal: AbortSignal | undefined,
-  ): void {
-    if (signal?.aborted === true) {
-      throw this.#abortedError(key, signal)
-    }
-  }
-
-  #abortedError(
-    key: FactoryKey | FactoryAlias,
-    signal: AbortSignal,
-  ): FactoryRegistryError {
-    return new FactoryRegistryError(
-      'ABORTED',
-      `Factory creation for "${key}" was aborted.`,
-      { cause: signal.reason, details: { key } },
-    )
-  }
 }
 
 export function smartFactoryRegistryFor<const Catalog extends FactoryCatalog>(

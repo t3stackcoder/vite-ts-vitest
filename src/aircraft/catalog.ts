@@ -6,6 +6,7 @@ import {
 } from '../generated/factory-set.generated'
 import {
   defineFactoryCatalog,
+  defineFactoryFor,
   factoryCatalogEntry,
   factoryContract,
   type Brand,
@@ -17,7 +18,12 @@ const aircraft = factorySet.aircraft
 const aircraftFactories = factoryDefinitionSet.aircraft
 export const aircraftType = productTypeSet.aircraft
 
-export { factoryDefinitionSet, factorySet, productTypeSet }
+// Only the aircraft slice of the generated vocabulary is part of this
+// domain's surface. Other domains' keys and product types live in the
+// generated module; consumers who need them import it directly instead of
+// reaching through aircraft's barrel.
+export const aircraftFactorySet = aircraft
+export const aircraftFactoryDefinitionSet = aircraftFactories
 
 export const PASSENGER_AIRCRAFT_FACTORY = aircraftFactories.passenger.key
 export const FREIGHT_AIRCRAFT_FACTORY = aircraftFactories.freight.key
@@ -153,4 +159,5 @@ export const AIRCRAFT_FACTORY_CATALOG = defineFactoryCatalog({
 
 export type AircraftFactoryCatalog = typeof AIRCRAFT_FACTORY_CATALOG
 
-export const AIRCRAFT_FACTORY_KEYS_BY_FILE = aircraft
+/** Curried once for the domain; factory modules import this instead of re-deriving it. */
+export const defineAircraftFactory = defineFactoryFor<AircraftFactoryCatalog>()

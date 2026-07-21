@@ -9,6 +9,8 @@ import {
   factoryCatalogEntry,
   factoryAliasSet,
   factoryContract,
+  factoryDomainFor,
+  factoryHarnessFor,
   factoryKey,
   factoryKeySet,
   factoryNamespace,
@@ -332,6 +334,90 @@ describe('SmartFactoryRegistry', () => {
     ).rejects.toMatchObject({ code: 'INVALID_FACTORY_CONTEXT' })
     expect(load).not.toHaveBeenCalled()
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('bounds context validation inside the creation timeout envelope', async () => {
+    vi.useFakeTimers()
+    const hangingContextSchema = alphaContextSchema.refine(
+      () => new Promise<boolean>(() => {}),
+    )
+    const catalog = defineFactoryCatalog({
+      ...factoryCatalogEntry(
+        ALPHA_FACTORY,
+        factoryContract({
+          contextSchema: hangingContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: alphaResultSchema,
+        }),
+      ),
+    })
+    const load = vi.fn(async () => ({ default: alphaFactory() }))
+    const registry = smartFactoryRegistryFor(catalog)({
+      creationTimeoutMs: 20,
+      sources: [
+        {
+          key: ALPHA_FACTORY,
+          load,
+          modulePath: modulePath('./fixtures/alpha.factory.ts'),
+        },
+      ],
+    })
+
+    const creation = registry.create(ALPHA_FACTORY, { value: 1 })
+    const timeoutAssertion = expect(creation).rejects.toMatchObject({
+      code: 'FACTORY_CREATION_TIMEOUT',
+    })
+    await vi.advanceTimersByTimeAsync(20)
+    await timeoutAssertion
+
+    // A stalled context parse is caller input, not factory health: the
+    // module was never loaded and the circuit is untouched.
+    expect(load).not.toHaveBeenCalled()
+    expect(registry.snapshot().factories[0]?.circuit).toEqual({
+      consecutiveFailures: 0,
+      status: 'closed',
+    })
+  })
+
+  it('honors the caller signal while context validation is in flight', async () => {
+    const parseStarted = deferred<void>()
+    const hangingContextSchema = alphaContextSchema.refine(() => {
+      parseStarted.resolve(undefined)
+      return new Promise<boolean>(() => {})
+    })
+    const catalog = defineFactoryCatalog({
+      ...factoryCatalogEntry(
+        ALPHA_FACTORY,
+        factoryContract({
+          contextSchema: hangingContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: alphaResultSchema,
+        }),
+      ),
+    })
+    const registry = smartFactoryRegistryFor(catalog)({
+      creationTimeoutMs: 50,
+      sources: [
+        {
+          key: ALPHA_FACTORY,
+          load: async () => ({ default: alphaFactory() }),
+          modulePath: modulePath('./fixtures/alpha.factory.ts'),
+        },
+      ],
+    })
+
+    const controller = new AbortController()
+    const creation = registry.create(
+      ALPHA_FACTORY,
+      { value: 1 },
+      { signal: controller.signal },
+    )
+    await parseStarted.promise
+    controller.abort('cancelled mid-validation')
+
+    await expect(creation).rejects.toMatchObject({ code: 'ABORTED' })
   })
 
   it('validates execution options before loading a factory chunk', async () => {
@@ -847,6 +933,263 @@ describe('import.meta.glob adapters', () => {
       }),
     ).toThrowError(expect.objectContaining({ code: 'INVALID_SOURCE' }))
   })
+
+  it('rejects an eager glob map and names the actual mistake', () => {
+    const keyFromPath = createFilenameKeyResolver({ alpha: ALPHA_FACTORY })
+    const eagerModules = {
+      './fixtures/alpha.factory.ts': { default: alphaFactory() },
+    }
+
+    expect(() =>
+      createGlobFactorySources<TestCatalog>(eagerModules as never, {
+        keyFromPath,
+      }),
+    ).toThrowError(/eager: true/)
+  })
+})
+
+describe('factory harness', () => {
+  it('fails at composition time when the glob missed a catalog key', () => {
+    const keyFromPath = createFilenameKeyResolver({
+      alpha: ALPHA_FACTORY,
+      beta: BETA_FACTORY,
+    })
+
+    // Without the coverage check this configuration would construct
+    // successfully and fail only at the first create() for beta with
+    // UNKNOWN_FACTORY — the one misconfiguration that used to escape
+    // composition time.
+    expect(() =>
+      factoryHarnessFor(TEST_CATALOG)({
+        keyFromPath,
+        modules: {
+          './fixtures/alpha.factory.ts': async () => ({
+            default: alphaFactory(),
+          }),
+        },
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVALID_SOURCE',
+        details: { uncoveredKeys: [BETA_FACTORY] },
+      }),
+    )
+  })
+
+  it('constructs when every catalog key has a discovered module', async () => {
+    const keyFromPath = createFilenameKeyResolver({
+      alpha: ALPHA_FACTORY,
+      beta: BETA_FACTORY,
+    })
+    const registry = factoryHarnessFor(TEST_CATALOG)({
+      keyFromPath,
+      modules: {
+        './fixtures/alpha.factory.ts': async () => ({
+          default: alphaFactory(),
+        }),
+        './fixtures/beta.factory.ts': async () => ({
+          default: betaFactory(),
+        }),
+      },
+    })
+
+    await expect(registry.create(ALPHA_FACTORY, { value: 2 })).resolves.toEqual(
+      { doubled: 4, kind: 'alpha' },
+    )
+  })
+
+  it('lets allowEmpty opt out of catalog coverage', () => {
+    const registry = factoryHarnessFor(TEST_CATALOG)({
+      allowEmpty: true,
+      keyFromPath: () => ALPHA_FACTORY,
+      modules: {},
+    })
+
+    expect(registry.keys()).toEqual([])
+  })
+})
+
+describe('factory domain', () => {
+  function domainModules() {
+    return {
+      './fixtures/alpha.factory.ts': async () => ({
+        default: alphaFactory(),
+      }),
+      './fixtures/beta.factory.ts': async () => ({
+        default: betaFactory(),
+      }),
+    }
+  }
+
+  it('derives the filename resolver from catalog key names', async () => {
+    const domain = factoryDomainFor(TEST_CATALOG)
+    const registry = domain.createRegistry(domainModules())
+
+    expect(registry.keys()).toEqual([ALPHA_FACTORY, BETA_FACTORY])
+    await expect(registry.create(ALPHA_FACTORY, { value: 2 })).resolves.toEqual(
+      { doubled: 4, kind: 'alpha' },
+    )
+  })
+
+  it('memoizes the lazy registry accessor without import-time work', () => {
+    const domain = factoryDomainFor(TEST_CATALOG)
+    const getRegistry = domain.lazyRegistry(domainModules())
+
+    expect(getRegistry()).toBe(getRegistry())
+  })
+
+  it('fails fast when two catalog keys share a filename stem', () => {
+    const collidingCatalog = defineFactoryCatalog({
+      ...factoryCatalogEntry(
+        ALPHA_FACTORY,
+        factoryContract({
+          contextSchema: alphaContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: alphaResultSchema,
+        }),
+      ),
+      ...factoryCatalogEntry(
+        factoryKey('other:alpha'),
+        factoryContract({
+          contextSchema: alphaContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: alphaResultSchema,
+        }),
+      ),
+    })
+
+    expect(() =>
+      factoryDomainFor(collidingCatalog).createRegistry({
+        './fixtures/alpha.factory.ts': async () => ({
+          default: alphaFactory(),
+        }),
+      }),
+    ).toThrowError(/stem "alpha"/)
+  })
+
+  it('honors an explicit keyFromPath override', async () => {
+    const domain = factoryDomainFor(TEST_CATALOG)
+    const registry = domain.createRegistry(
+      {
+        './fixtures/renamed-alpha.factory.ts': async () => ({
+          default: alphaFactory(),
+        }),
+        './fixtures/renamed-beta.factory.ts': async () => ({
+          default: betaFactory(),
+        }),
+      },
+      {
+        keyFromPath: createFilenameKeyResolver({
+          'renamed-alpha': ALPHA_FACTORY,
+          'renamed-beta': BETA_FACTORY,
+        }),
+      },
+    )
+
+    await expect(registry.create(ALPHA_FACTORY, { value: 2 })).resolves.toEqual(
+      { doubled: 4, kind: 'alpha' },
+    )
+  })
+})
+
+describe('catalog and factory definition', () => {
+  it('adopts validated contract copies so later mutation cannot alter enforcement', () => {
+    const mutableContract = {
+      contextSchema: alphaContextSchema as z.ZodType,
+      discriminator: 'kind',
+      productType: ALPHA_PRODUCT_TYPE as string,
+      resultSchema: alphaResultSchema as z.ZodType,
+    }
+    const catalog = defineFactoryCatalog({ 'test:alpha': mutableContract })
+
+    mutableContract.productType = BETA_PRODUCT_TYPE
+    mutableContract.resultSchema = betaResultSchema
+
+    // The registry re-reads contracts on every create(), so the catalog must
+    // hold frozen copies adopted at definition time, not live references.
+    const adopted = catalog['test:alpha']
+    expect(adopted).not.toBe(mutableContract)
+    expect(Object.isFrozen(adopted)).toBe(true)
+    expect(adopted.productType).toBe(ALPHA_PRODUCT_TYPE)
+    expect(adopted.resultSchema).toBe(alphaResultSchema)
+  })
+
+  it('accepts schemas from a second zod copy via structural checking', async () => {
+    function foreignSchemaCopy<Schema extends z.ZodType>(
+      schema: Schema,
+    ): Schema {
+      // Same parse surface, different class identity — as with a schema
+      // built by a second bundled copy of zod, instanceof z.ZodType is
+      // false for this object.
+      return {
+        parse: (value: unknown) => schema.parse(value),
+        safeParse: (value: unknown) => schema.safeParse(value),
+        safeParseAsync: (value: unknown) => schema.safeParseAsync(value),
+      } as unknown as Schema
+    }
+
+    const foreignContextSchema = foreignSchemaCopy(alphaContextSchema)
+    expect(foreignContextSchema instanceof z.ZodType).toBe(false)
+
+    const catalog = defineFactoryCatalog({
+      ...factoryCatalogEntry(
+        ALPHA_FACTORY,
+        factoryContract({
+          contextSchema: foreignContextSchema,
+          discriminator: 'kind',
+          productType: ALPHA_PRODUCT_TYPE,
+          resultSchema: foreignSchemaCopy(alphaResultSchema),
+        }),
+      ),
+    })
+    const registry = smartFactoryRegistryFor(catalog)({
+      sources: [
+        {
+          key: ALPHA_FACTORY,
+          load: async () => ({ default: alphaFactory() }),
+          modulePath: modulePath('./fixtures/alpha.factory.ts'),
+        },
+      ],
+    })
+
+    await expect(registry.create(ALPHA_FACTORY, { value: 3 })).resolves.toEqual(
+      { doubled: 6, kind: 'alpha' },
+    )
+  })
+
+  it('still rejects non-schema values at contract definition time', () => {
+    expect(() =>
+      factoryContract({
+        contextSchema: {} as never,
+        discriminator: 'kind',
+        productType: ALPHA_PRODUCT_TYPE,
+        resultSchema: alphaResultSchema,
+      }),
+    ).toThrowError(/Expected a Zod schema/)
+  })
+
+  it('fails at authoring time on malformed metadata or product type', () => {
+    expect(() =>
+      defineTestFactory(ALPHA_FACTORY)({
+        create: (context) => ({ doubled: context.value * 2, kind: 'alpha' }),
+        metadata: {
+          displayName: 'Alpha Factory',
+          version: 'not-semver' as never,
+        },
+        productType: ALPHA_PRODUCT_TYPE,
+      }),
+    ).toThrowError()
+
+    expect(() =>
+      defineTestFactory(ALPHA_FACTORY)({
+        create: (context) => ({ doubled: context.value * 2, kind: 'alpha' }),
+        metadata: { displayName: 'Alpha Factory', version: '1.0.0' },
+        productType: 'Not A Product Type' as never,
+      }),
+    ).toThrowError()
+  })
 })
 
 describe('registry events', () => {
@@ -908,6 +1251,25 @@ describe('registry events', () => {
       'circuit-reset',
       'concurrency-reset',
     ])
+  })
+
+  it('suppresses load telemetry for revisions superseded by invalidate()', async () => {
+    const gate = deferred<CatalogFactoryModule<TestCatalog>>()
+    const events: FactoryRegistryEvent[] = []
+    const registry = createTestRegistry({
+      onEvent: (event) => events.push(event),
+      sources: [source(ALPHA_FACTORY, 'alpha', () => gate.promise)],
+    })
+
+    const preloading = registry.preload([ALPHA_FACTORY])
+    registry.invalidate(ALPHA_FACTORY)
+    gate.resolve({ default: alphaFactory() })
+    await preloading
+
+    // The registry never adopted this load result, so telemetry must not
+    // report it either: the event stream and snapshot() agree.
+    expect(events.map((event) => event.type)).toEqual(['factory-invalidated'])
+    expect(registry.snapshot().factories[0]?.status).toBe('idle')
   })
 
   it('keeps creating products when an event listener throws', async () => {
@@ -1145,6 +1507,7 @@ describe('public API surface', () => {
       'factoryAliasSet',
       'factoryCatalogEntry',
       'factoryContract',
+      'factoryDomainFor',
       'factoryHarnessFor',
       'factoryKey',
       'factoryKeySet',

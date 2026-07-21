@@ -139,8 +139,8 @@ export interface FactoryNamespace<Namespace extends string> {
  * Builds keys and aliases from known parts so the "namespace:name" format is
  * composed by the type system instead of typed by hand. The namespace is
  * written once and validated eagerly; the colon can never be mistyped
- * because it is never typed. `aircraft.key('passenger')` infers
- * `FactoryKey<'aircraft:passenger'>` exactly.
+ * because it is never typed. `billing.key('invoice')` infers
+ * `FactoryKey<'billing:invoice'>` exactly.
  */
 export function factoryNamespace<const Namespace extends string>(
   namespace: Namespace & FactoryKeySegment<Namespace>,
@@ -179,8 +179,8 @@ type ScreenedSegments<Names extends readonly string[]> = {
  * from it: the branded key values become properties, and the union type
  * comes from the same tuple. Types are erased at runtime, so derivation can
  * only flow value → type — this is the closest inversion available, and it
- * makes every usage site compiler-checked: `aircraft.passenger2` is a
- * property-access error unless 'passenger2' was declared.
+ * makes every usage site compiler-checked: `billing.invoice2` is a
+ * property-access error unless 'invoice2' was declared.
  */
 export function factoryKeySet<
   const Namespace extends string,

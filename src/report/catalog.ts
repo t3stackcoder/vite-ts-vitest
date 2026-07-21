@@ -6,6 +6,7 @@ import {
 } from '../generated/factory-set.generated'
 import {
   defineFactoryCatalog,
+  defineFactoryFor,
   factoryCatalogEntry,
   factoryContract,
 } from '../factory-core'
@@ -13,7 +14,12 @@ import {
 const reportFactories = factoryDefinitionSet.report
 export const reportType = productTypeSet.report
 
-export { factoryDefinitionSet, factorySet, productTypeSet }
+// Only the report slice of the generated vocabulary is part of this
+// domain's surface. Other domains' keys and product types live in the
+// generated module; consumers who need them import it directly instead of
+// reaching through report's barrel.
+export const reportFactorySet = factorySet.report
+export const reportFactoryDefinitionSet = reportFactories
 
 export const PRINT_REPORT_FACTORY = reportFactories.print.key
 export const SPREADSHEET_REPORT_FACTORY = reportFactories.spreadsheet.key
@@ -80,4 +86,5 @@ export const REPORT_FACTORY_CATALOG = defineFactoryCatalog({
 
 export type ReportFactoryCatalog = typeof REPORT_FACTORY_CATALOG
 
-export const REPORT_FACTORY_KEYS_BY_FILE = factorySet.report
+/** Curried once for the domain; factory modules import this instead of re-deriving it. */
+export const defineReportFactory = defineFactoryFor<ReportFactoryCatalog>()

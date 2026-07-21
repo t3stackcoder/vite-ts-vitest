@@ -13,6 +13,13 @@ import type {
 } from './contracts'
 import { FactoryRegistryError } from './errors'
 
+/**
+ * The loader map produced by a bare (lazy) import.meta.glob call. Lazy-only
+ * by design: every value must be a `() => Promise` loader so the registry
+ * can code-split, deduplicate, and cache loads itself; an `{ eager: true }`
+ * glob provides already-loaded modules instead of loaders and is rejected
+ * at source creation.
+ */
 export type GlobLoaderMap<Module> = Readonly<
   Record<string, () => Promise<Module>>
 >
@@ -26,8 +33,9 @@ export function createGlobFactorySources<Catalog extends FactoryCatalog>(
   modules: GlobLoaderMap<CatalogFactoryModule<Catalog>>,
   options: GlobFactorySourceOptions<Catalog>,
 ): readonly FactorySource<Catalog>[] {
+  // Code-unit comparison keeps the ordering host-locale-independent.
   const entries = Object.entries(modules).sort(([left], [right]) =>
-    left.localeCompare(right),
+    left < right ? -1 : left > right ? 1 : 0,
   )
 
   if (entries.length === 0 && options.allowEmpty !== true) {
@@ -42,7 +50,10 @@ export function createGlobFactorySources<Catalog extends FactoryCatalog>(
     if (typeof load !== 'function') {
       throw new FactoryRegistryError(
         'INVALID_SOURCE',
-        `The glob entry "${rawPath}" does not contain a module loader.`,
+        `The glob entry "${rawPath}" does not contain a module loader. ` +
+          'Pass a lazy import.meta.glob map: a glob called with ' +
+          '{ eager: true } provides already-loaded modules instead of ' +
+          'loaders and is not supported.',
       )
     }
 
