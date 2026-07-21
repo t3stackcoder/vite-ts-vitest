@@ -494,7 +494,9 @@ Adding a conforming factory module now makes its key and product relationship
 available at design time after generation. No aircraft-specific registry,
 alias list, or product-category list must be edited. A domain catalog still
 owns the meaningful part that cannot be inferred from a filename: its context
-and result schemas, selected discriminator, and resilience policy.
+and result schemas, selected discriminator, and resilience policy. A
+step-by-step walkthrough for wiring a complete new domain lives in
+[adding-a-domain.md](adding-a-domain.md).
 
 This checkpoint intentionally stops before UI, persistence, remote plugin
 distribution, or package extraction. Those concerns can now be evaluated
